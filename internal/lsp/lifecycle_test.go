@@ -43,6 +43,35 @@ func TestWorkspaceLifecycleAndNavigationCoverage(t *testing.T) {
 	}))
 	requireLocations(t, "implementation", implementation, filepath.Base(implPath), "DefaultGreeter.java")
 
+	interfaceImpl := server.handleImplementation(context.Background(), json.RawMessage(`4a`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + greeterPath},
+		Position:     Position{Line: 4, Character: 12},
+	}))
+	requireLocations(t, "interface implementation", interfaceImpl, filepath.Base(implPath), "DefaultGreeter.java")
+
+	implDecl := server.handleDeclaration(context.Background(), json.RawMessage(`4b`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + implPath},
+		Position:     Position{Line: 7, Character: 18},
+	}))
+	requireLocations(t, "implementation declaration", implDecl, filepath.Base(greeterPath), "Greeter.java")
+
+	refs := server.handleReferences(context.Background(), json.RawMessage(`4c`), mustRawJSON(t, referenceParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + greeterPath},
+		Position:     Position{Line: 4, Character: 12},
+		Context: struct {
+			IncludeDeclaration bool `json:"includeDeclaration"`
+		}{
+			IncludeDeclaration: true,
+		},
+	}))
+	if refs == nil || refs.Error != nil {
+		t.Fatalf("references error = %#v", refs)
+	}
+	refLocations, ok := refs.Result.([]Location)
+	if !ok || len(refLocations) < 3 {
+		t.Fatalf("references result = %#v", refs.Result)
+	}
+
 	signature := server.handleSignatureHelp(json.RawMessage(`5`), mustRawJSON(t, signatureHelpParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + implPath},
 		Position:     Position{Line: 8, Character: 30},
@@ -157,6 +186,46 @@ public class DemoApplication {
 	content := readFile(t, strings.TrimPrefix(locations[0].URI, "file://"))
 	if !strings.Contains(content, "public class com.acme.NoSourceGreeter") {
 		t.Fatalf("decompiled content = %q", content)
+	}
+}
+
+func TestJDKDefinitionPrefersRuntimeSources(t *testing.T) {
+	server := newTestServer(t)
+	moduleRoot := t.TempDir()
+	sourcePath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "DemoApplication.java")
+
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, sourcePath, `package com.example.demo;
+
+public class DemoApplication {
+    public void run() {
+        throw new RuntimeException("boom");
+    }
+}
+`)
+
+	server.handleInitialize(json.RawMessage(`1`), mustRawJSON(t, initializeParams{
+		RootURI: "file://" + moduleRoot,
+	}))
+	openDocument(t, server, sourcePath)
+	sourceText := readFile(t, sourcePath)
+
+	response := server.handleDefinition(context.Background(), json.RawMessage(`2`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + sourcePath},
+		Position: Position{
+			Line:      4,
+			Character: lineColumnAtSubstring(sourceText, 4, "RuntimeException") + 2,
+		},
+	}))
+	if response == nil || response.Error != nil {
+		t.Fatalf("jdk definition error = %#v", response)
+	}
+	locations, ok := response.Result.([]Location)
+	if !ok || len(locations) == 0 {
+		t.Fatalf("jdk definition result = %#v", response.Result)
+	}
+	if got := locations[0].URI; !strings.HasSuffix(got, "/RuntimeException.java") {
+		t.Fatalf("jdk definition uri = %q, want RuntimeException.java", got)
 	}
 }
 

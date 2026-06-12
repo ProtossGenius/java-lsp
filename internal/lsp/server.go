@@ -133,6 +133,8 @@ func (s *Server) handleMessage(ctx context.Context, message incomingMessage) (bo
 		return false, s.handleDeclaration(ctx, message.ID, message.Params)
 	case "textDocument/implementation":
 		return false, s.handleImplementation(ctx, message.ID, message.Params)
+	case "textDocument/references":
+		return false, s.handleReferences(ctx, message.ID, message.Params)
 	case "textDocument/completion":
 		return false, s.handleCompletion(ctx, message.ID, message.Params)
 	case "workspace/didRenameFiles":
@@ -179,6 +181,7 @@ func (s *Server) handleInitialize(id json.RawMessage, raw json.RawMessage) *resp
 				"definitionProvider":     true,
 				"declarationProvider":    true,
 				"implementationProvider": true,
+				"referencesProvider":     true,
 				"completionProvider": map[string]any{
 					"triggerCharacters": []string{"."},
 				},
@@ -219,6 +222,37 @@ func (s *Server) handleDeclaration(ctx context.Context, id json.RawMessage, raw 
 
 func (s *Server) handleImplementation(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {
 	return s.handleNavigation(ctx, id, raw, s.navigation.implementation)
+}
+
+func (s *Server) handleReferences(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {
+	var params referenceParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return invalidParamsResponse(id, err)
+	}
+
+	text, err := s.documentText(params.TextDocument.URI)
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+	path, ok := filePathFromURI(params.TextDocument.URI)
+	if !ok {
+		return internalErrorResponse(id, errors.New("unsupported document URI"))
+	}
+	root := s.workspaceRootForURI(params.TextDocument.URI)
+	locations, err := s.navigation.references(ctx, root, navigationRequest{
+		uri:      params.TextDocument.URI,
+		text:     text,
+		path:     path,
+		position: params.Position,
+	}, params.Context.IncludeDeclaration)
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+	return &responseMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  locations,
+	}
 }
 
 func (s *Server) handleCompletion(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {

@@ -280,6 +280,14 @@ func methodSignatureForCompletion(line string) (completionMethod, bool) {
 		return completionMethod{}, false
 	}
 	returnType := compactType(matches[1])
+	forbidden := map[string]struct{}{
+		"throw": {}, "return": {}, "new": {}, "if": {}, "for": {}, "while": {}, "switch": {}, "catch": {},
+	}
+	for _, token := range strings.Fields(returnType) {
+		if _, ok := forbidden[token]; ok {
+			return completionMethod{}, false
+		}
+	}
 	return completionMethod{
 		name:       name,
 		returnType: returnType,

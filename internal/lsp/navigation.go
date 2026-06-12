@@ -22,10 +22,212 @@ type navigationResolver struct {
 	classpath map[string]*moduleClasspath
 }
 
+func workspaceReferences(root, symbol string, includeDeclaration bool) []Location {
+	if root == "" || symbol == "" {
+		return nil
+	}
+	documents, err := workspaceDocumentsForRoot(root, "", "")
+	if err != nil {
+		return nil
+	}
+	locations := make([]Location, 0)
+	for uri, content := range documents {
+		path, ok := filePathFromURI(uri)
+		if !ok {
+			continue
+		}
+		for _, location := range findIdentifierLocations(path, content, symbol) {
+			if !includeDeclaration && looksLikeDeclarationLine(content, location.Range.Start.Line, symbol) {
+				continue
+			}
+			locations = append(locations, location)
+		}
+	}
+	sort.Slice(locations, func(i, j int) bool {
+		if locations[i].URI != locations[j].URI {
+			return locations[i].URI < locations[j].URI
+		}
+		if locations[i].Range.Start.Line != locations[j].Range.Start.Line {
+			return locations[i].Range.Start.Line < locations[j].Range.Start.Line
+		}
+		return locations[i].Range.Start.Character < locations[j].Range.Start.Character
+	})
+	return locations
+}
+
 type moduleClasspath struct {
 	moduleRoot  string
 	reactorRoot string
 	jars        []jarArtifact
+}
+
+func methodSymbolAtPosition(text string, pos Position) (methodSymbol, bool) {
+	lines := strings.Split(text, "\n")
+	if pos.Line < 0 || pos.Line >= len(lines) {
+		return methodSymbol{}, false
+	}
+	line := lines[pos.Line]
+	method, ok := methodSignatureForCompletion(strings.TrimSpace(line))
+	if !ok {
+		return methodSymbol{}, false
+	}
+	identifier, err := wordAtPosition(text, pos)
+	if err != nil || identifier != method.name {
+		return methodSymbol{}, false
+	}
+	ctx := parseSourceContext(text)
+	typeName := parseDeclaredTypeName(text)
+	if typeName == "" {
+		return methodSymbol{}, false
+	}
+	fqcn := typeName
+	if ctx.packageName != "" {
+		fqcn = ctx.packageName + "." + typeName
+	}
+	isInterface := strings.Contains(firstTypeHeader(text), "interface ")
+	return methodSymbol{
+		fqcn:        fqcn,
+		typeName:    typeName,
+		methodName:  method.name,
+		isInterface: isInterface,
+	}, true
+}
+
+func (r *navigationResolver) declarationsForMethod(ctx context.Context, root, path string, method methodSymbol) ([]Location, error) {
+	header := firstTypeHeader(readFileString(path))
+	for _, candidate := range splitTypeList(header) {
+		target := resolveTypeName(parseSourceContext(readFileString(path)), candidate)
+		location, err := r.locationForTypeMember(ctx, root, path, target, method.methodName)
+		if err == nil {
+			return []Location{location}, nil
+		}
+	}
+	location, err := r.locationForTypeMember(ctx, root, path, method.fqcn, method.methodName)
+	if err != nil {
+		return nil, nil
+	}
+	return []Location{location}, nil
+}
+
+func findIdentifierLocations(path, content, symbol string) []Location {
+	lines := strings.Split(content, "\n")
+	needle := []rune(symbol)
+	locations := make([]Location, 0)
+	for lineIndex, line := range lines {
+		runes := []rune(line)
+		for i := 0; i+len(needle) <= len(runes); i++ {
+			if !runesEqual(runes[i:i+len(needle)], needle) {
+				continue
+			}
+			if i > 0 && isJavaIdentifierPart(runes[i-1]) {
+				continue
+			}
+			end := i + len(needle)
+			if end < len(runes) && isJavaIdentifierPart(runes[end]) {
+				continue
+			}
+			locations = append(locations, Location{
+				URI: fileURIFromPath(path),
+				Range: Range{
+					Start: Position{Line: lineIndex, Character: i},
+					End:   Position{Line: lineIndex, Character: end},
+				},
+			})
+			i = end - 1
+		}
+	}
+	return locations
+}
+
+func looksLikeDeclarationLine(content string, lineIndex int, symbol string) bool {
+	lines := strings.Split(content, "\n")
+	if lineIndex < 0 || lineIndex >= len(lines) {
+		return false
+	}
+	line := strings.TrimSpace(lines[lineIndex])
+	if strings.Contains(line, "class "+symbol) || strings.Contains(line, "interface "+symbol) || strings.Contains(line, "record "+symbol) {
+		return true
+	}
+	if method, ok := methodSignatureForCompletion(line); ok && method.name == symbol {
+		return true
+	}
+	return false
+}
+
+func (r *navigationResolver) jdkSourcePathForType(fqcn string) (string, bool, error) {
+	if !strings.HasPrefix(fqcn, "java.") && !strings.HasPrefix(fqcn, "javax.") && !strings.HasPrefix(fqcn, "jdk.") && !strings.HasPrefix(fqcn, "sun.") {
+		return "", false, nil
+	}
+
+	srcZip := detectJDKSrcZip()
+	if srcZip != "" {
+		modulePath := modulePathForJDKType(fqcn)
+		if modulePath != "" {
+			found, err := zipContains(srcZip, modulePath)
+			if err != nil {
+				return "", false, err
+			}
+			if found {
+				sourcePath, err := r.extractSourceFile(srcZip, modulePath)
+				if err != nil {
+					return "", false, err
+				}
+				return sourcePath, true, nil
+			}
+		}
+	}
+
+	jmod := detectJavaBaseJmod()
+	if jmod != "" {
+		outputPath, err := r.decompileClass(jmod, fqcn)
+		if err != nil {
+			return "", false, err
+		}
+		return outputPath, true, nil
+	}
+	return "", false, nil
+}
+
+func detectJDKSrcZip() string {
+	if javaHome := currentJavaHome(); javaHome != "" {
+		srcZip := filepath.Join(javaHome, "lib", "src.zip")
+		if _, err := os.Stat(srcZip); err == nil {
+			return srcZip
+		}
+	}
+	return ""
+}
+
+func detectJavaBaseJmod() string {
+	if javaHome := currentJavaHome(); javaHome != "" {
+		jmod := filepath.Join(javaHome, "jmods", "java.base.jmod")
+		if _, err := os.Stat(jmod); err == nil {
+			return jmod
+		}
+	}
+	return ""
+}
+
+func currentJavaHome() string {
+	if home := os.Getenv("JAVA_HOME"); home != "" {
+		return home
+	}
+	output, err := exec.Command("/usr/libexec/java_home").Output()
+	if err == nil {
+		return strings.TrimSpace(string(output))
+	}
+	return ""
+}
+
+func modulePathForJDKType(fqcn string) string {
+	switch {
+	case strings.HasPrefix(fqcn, "java."):
+		return "java.base/" + strings.ReplaceAll(fqcn, ".", "/") + ".java"
+	case strings.HasPrefix(fqcn, "javax."):
+		return "java.management/" + strings.ReplaceAll(fqcn, ".", "/") + ".java"
+	default:
+		return "java.base/" + strings.ReplaceAll(fqcn, ".", "/") + ".java"
+	}
 }
 
 type jarArtifact struct {
@@ -51,6 +253,13 @@ type memberAccess struct {
 	receiver string
 	member   string
 	focus    string
+}
+
+type methodSymbol struct {
+	fqcn        string
+	typeName    string
+	methodName  string
+	isInterface bool
 }
 
 type implementationCandidate struct {
@@ -92,6 +301,13 @@ func (r *navigationResolver) definition(ctx context.Context, root string, req na
 	if err != nil {
 		return nil, err
 	}
+	if method, ok := methodSymbolAtPosition(req.text, req.position); ok {
+		location, err := r.locationForTypeMember(ctx, root, req.path, method.fqcn, method.methodName)
+		if err != nil {
+			return nil, err
+		}
+		return []Location{location}, nil
+	}
 	fqcn := resolveTypeName(contextInfo, identifier)
 	if fqcn == "" {
 		return nil, errors.New("could not resolve type at cursor")
@@ -103,12 +319,57 @@ func (r *navigationResolver) definition(ctx context.Context, root string, req na
 	return []Location{location}, nil
 }
 
+func (r *navigationResolver) references(ctx context.Context, root string, req navigationRequest, includeDeclaration bool) ([]Location, error) {
+	if member, ok, err := memberAccessAtPosition(req.text, req.position); err != nil {
+		return nil, err
+	} else if ok {
+		return workspaceReferences(root, member.member, includeDeclaration), nil
+	}
+
+	if method, ok := methodSymbolAtPosition(req.text, req.position); ok {
+		return workspaceReferences(root, method.methodName, includeDeclaration), nil
+	}
+
+	identifier, err := wordAtPosition(req.text, req.position)
+	if err != nil {
+		return nil, err
+	}
+	return workspaceReferences(root, identifier, includeDeclaration), nil
+}
+
 func (r *navigationResolver) declaration(ctx context.Context, root string, req navigationRequest) ([]Location, error) {
+	if method, ok := methodSymbolAtPosition(req.text, req.position); ok {
+		decls, err := r.declarationsForMethod(ctx, root, req.path, method)
+		if err != nil {
+			return nil, err
+		}
+		if len(decls) > 0 {
+			return decls, nil
+		}
+	}
 	return r.definition(ctx, root, req)
 }
 
 func (r *navigationResolver) implementation(ctx context.Context, root string, req navigationRequest) ([]Location, error) {
 	contextInfo := parseSourceContext(req.text)
+
+	if method, ok := methodSymbolAtPosition(req.text, req.position); ok {
+		workspaceDocs, err := workspaceDocumentsForRoot(root, req.uri, req.text)
+		if err != nil {
+			return nil, err
+		}
+		if method.isInterface {
+			workspaceImplementations := workspaceImplementationsForTypeMember(workspaceDocs, method.fqcn, method.methodName)
+			if len(workspaceImplementations) > 0 {
+				return workspaceImplementations, nil
+			}
+		}
+		location, err := r.locationForTypeMember(ctx, root, req.path, method.fqcn, method.methodName)
+		if err != nil {
+			return nil, err
+		}
+		return []Location{location}, nil
+	}
 
 	member, ok, err := memberAccessAtPosition(req.text, req.position)
 	if err != nil {
@@ -405,6 +666,11 @@ func workspaceImplementationsForTypeMember(documents map[string]string, fqcn, me
 }
 
 func (r *navigationResolver) materializeTypeSource(ctx context.Context, path, fqcn string) (string, error) {
+	if jdkPath, ok, err := r.jdkSourcePathForType(fqcn); err != nil {
+		return "", err
+	} else if ok {
+		return jdkPath, nil
+	}
 	module, err := r.moduleForPath(ctx, path)
 	if err != nil {
 		return "", err
@@ -740,13 +1006,24 @@ func resolveTypeName(ctx sourceContext, name string) string {
 	if fqcn, ok := ctx.imports[name]; ok {
 		return fqcn
 	}
-	if name == "String" {
-		return "java.lang.String"
+	if isJavaLangType(name) {
+		return "java.lang." + name
 	}
 	if ctx.packageName != "" {
 		return ctx.packageName + "." + name
 	}
 	return name
+}
+
+func isJavaLangType(name string) bool {
+	switch name {
+	case "String", "Object", "Class", "Throwable", "Exception", "RuntimeException", "IllegalArgumentException",
+		"IllegalStateException", "NullPointerException", "System", "Long", "Integer", "Short", "Byte", "Double",
+		"Float", "Boolean", "Character", "Void", "Number", "Math", "Enum", "Iterable":
+		return true
+	default:
+		return false
+	}
 }
 
 func memberAccessAtPosition(text string, pos Position) (memberAccess, bool, error) {
