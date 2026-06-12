@@ -22,11 +22,12 @@ var ErrServerExited = errors.New("server exited")
 const textDocumentSyncFull = 1
 
 type Server struct {
-	analyzer  *engine.Analyzer
-	logger    *log.Logger
-	mu        sync.Mutex
-	documents map[string]openedDocument
-	shutdown  bool
+	analyzer       *engine.Analyzer
+	logger         *log.Logger
+	mu             sync.RWMutex
+	documents      map[string]openedDocument
+	workspaceRoots []string
+	shutdown       bool
 }
 
 type openedDocument struct {
@@ -51,29 +52,6 @@ type responseMessage struct {
 type responseError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
-}
-
-type didOpenParams struct {
-	TextDocument struct {
-		URI        string `json:"uri"`
-		LanguageID string `json:"languageId"`
-		Text       string `json:"text"`
-	} `json:"textDocument"`
-}
-
-type didChangeParams struct {
-	TextDocument struct {
-		URI string `json:"uri"`
-	} `json:"textDocument"`
-	ContentChanges []struct {
-		Text string `json:"text"`
-	} `json:"contentChanges"`
-}
-
-type didCloseParams struct {
-	TextDocument struct {
-		URI string `json:"uri"`
-	} `json:"textDocument"`
 }
 
 func NewServer(analyzer *engine.Analyzer) *Server {
@@ -110,19 +88,7 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 func (s *Server) handleMessage(ctx context.Context, message incomingMessage) (bool, *responseMessage) {
 	switch message.Method {
 	case "initialize":
-		return false, &responseMessage{
-			JSONRPC: "2.0",
-			ID:      message.ID,
-			Result: map[string]any{
-				"capabilities": map[string]any{
-					"textDocumentSync": textDocumentSyncFull,
-				},
-				"serverInfo": map[string]any{
-					"name":    "java-lsp",
-					"version": "0.1.0",
-				},
-			},
-		}
+		return false, s.handleInitialize(message.ID, message.Params)
 	case "initialized":
 		return false, nil
 	case "shutdown":
@@ -143,6 +109,13 @@ func (s *Server) handleMessage(ctx context.Context, message incomingMessage) (bo
 	case "textDocument/didClose":
 		s.handleDidClose(message.Params)
 		return false, nil
+	case "textDocument/rename":
+		return false, s.handleRename(message.ID, message.Params)
+	case "textDocument/signatureHelp":
+		return false, s.handleSignatureHelp(message.ID, message.Params)
+	case "workspace/didRenameFiles":
+		s.handleDidRenameFiles(ctx, message.Params)
+		return false, nil
 	default:
 		if len(message.ID) == 0 {
 			return false, nil
@@ -155,6 +128,56 @@ func (s *Server) handleMessage(ctx context.Context, message incomingMessage) (bo
 				Message: "method not found",
 			},
 		}
+	}
+}
+
+func (s *Server) handleInitialize(id json.RawMessage, raw json.RawMessage) *responseMessage {
+	var params initializeParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return &responseMessage{
+				JSONRPC: "2.0",
+				ID:      id,
+				Error: &responseError{
+					Code:    -32602,
+					Message: fmt.Sprintf("invalid initialize params: %v", err),
+				},
+			}
+		}
+	}
+
+	s.setWorkspaceRoots(params)
+
+	return &responseMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: map[string]any{
+			"capabilities": map[string]any{
+				"textDocumentSync": textDocumentSyncFull,
+				"renameProvider":   true,
+				"signatureHelpProvider": map[string]any{
+					"triggerCharacters": []string{"(", ","},
+				},
+				"workspace": map[string]any{
+					"fileOperations": map[string]any{
+						"didRename": map[string]any{
+							"filters": []map[string]any{
+								{
+									"scheme": "file",
+									"pattern": map[string]any{
+										"glob": "**/*.java",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"serverInfo": map[string]any{
+				"name":    "java-lsp",
+				"version": "0.2.0",
+			},
+		},
 	}
 }
 
@@ -214,6 +237,122 @@ func (s *Server) handleDidClose(raw json.RawMessage) {
 	s.mu.Unlock()
 }
 
+func (s *Server) handleRename(id json.RawMessage, raw json.RawMessage) *responseMessage {
+	var params renameParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return invalidParamsResponse(id, err)
+	}
+	if !isJavaIdentifier(params.NewName) {
+		return &responseMessage{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error: &responseError{
+				Code:    -32602,
+				Message: "newName must be a valid Java identifier",
+			},
+		}
+	}
+
+	text, err := s.documentText(params.TextDocument.URI)
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+	oldName, err := wordAtPosition(text, params.Position)
+	if err != nil {
+		return &responseMessage{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error: &responseError{
+				Code:    -32602,
+				Message: err.Error(),
+			},
+		}
+	}
+	if oldName == params.NewName {
+		return &responseMessage{
+			JSONRPC: "2.0",
+			ID:      id,
+			Result:  WorkspaceEdit{Changes: map[string][]TextEdit{}},
+		}
+	}
+
+	root := s.workspaceRootForURI(params.TextDocument.URI)
+	changes, err := s.renameWorkspaceDocuments(root, params.TextDocument.URI, oldName, params.NewName)
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+
+	return &responseMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: WorkspaceEdit{
+			Changes: changes,
+		},
+	}
+}
+
+func (s *Server) handleSignatureHelp(id json.RawMessage, raw json.RawMessage) *responseMessage {
+	var params signatureHelpParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return invalidParamsResponse(id, err)
+	}
+
+	text, err := s.documentText(params.TextDocument.URI)
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+
+	result, err := signatureHelpAtPosition(text, params.Position)
+	if err != nil {
+		return &responseMessage{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error: &responseError{
+				Code:    -32602,
+				Message: err.Error(),
+			},
+		}
+	}
+
+	return &responseMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  result,
+	}
+}
+
+func (s *Server) handleDidRenameFiles(ctx context.Context, raw json.RawMessage) {
+	var params didRenameFilesParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		s.logger.Printf("decode didRenameFiles: %v", err)
+		return
+	}
+
+	s.mu.Lock()
+	renamedDocs := make([]struct {
+		uri string
+		doc openedDocument
+	}, 0, len(params.Files))
+	for _, file := range params.Files {
+		doc, ok := s.documents[file.OldURI]
+		if ok {
+			delete(s.documents, file.OldURI)
+			s.documents[file.NewURI] = doc
+			renamedDocs = append(renamedDocs, struct {
+				uri string
+				doc openedDocument
+			}{uri: file.NewURI, doc: doc})
+		}
+	}
+	s.mu.Unlock()
+
+	for _, renamed := range renamedDocs {
+		if err := s.analyze(ctx, renamed.uri, renamed.doc.language, renamed.doc.text); err != nil {
+			s.logger.Printf("analyze didRenameFiles %s: %v", renamed.uri, err)
+		}
+	}
+}
+
 func (s *Server) analyze(ctx context.Context, uri, language, text string) error {
 	_, err := s.analyzer.Analyze(ctx, syntax.Document{
 		URI:      uri,
@@ -221,6 +360,28 @@ func (s *Server) analyze(ctx context.Context, uri, language, text string) error 
 		Text:     text,
 	})
 	return err
+}
+
+func invalidParamsResponse(id json.RawMessage, err error) *responseMessage {
+	return &responseMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &responseError{
+			Code:    -32602,
+			Message: fmt.Sprintf("invalid params: %v", err),
+		},
+	}
+}
+
+func internalErrorResponse(id json.RawMessage, err error) *responseMessage {
+	return &responseMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &responseError{
+			Code:    -32603,
+			Message: err.Error(),
+		},
+	}
 }
 
 func readMessage(reader *bufio.Reader) (incomingMessage, error) {
