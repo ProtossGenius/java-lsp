@@ -65,10 +65,20 @@ type WorkspaceEdit struct {
 	Changes map[string][]TextEdit `json:"changes,omitempty"`
 }
 
+type Location struct {
+	URI   string `json:"uri"`
+	Range Range  `json:"range"`
+}
+
 type renameParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
 	Position     Position               `json:"position"`
 	NewName      string                 `json:"newName"`
+}
+
+type textDocumentPositionParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
 }
 
 type signatureHelpParams struct {

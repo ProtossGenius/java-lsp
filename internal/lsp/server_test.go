@@ -1,10 +1,12 @@
 package lsp
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ProtossGenius/java-lsp/pkg/engine"
@@ -133,6 +135,72 @@ public class App {
 	}
 }
 
+func TestDependencyDeclarationAndImplementationNavigateIntoSourceJars(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	moduleRoot := filepath.Join(root, "demo")
+	sourcePath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "DemoApplication.java")
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, sourcePath, `package com.example.demo;
+
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
+public class DemoApplication {
+    void run() {
+        log.info("hello");
+    }
+}
+`)
+
+	repoDir := filepath.Join(root, "repo")
+	buildFakeDependencyJars(t, repoDir)
+	writeFile(t, filepath.Join(moduleRoot, "mvnw"), "#!/bin/sh\nset -eu\noutput=\"${4#-Dmdep.outputFile=}\"\nprintf '%s' \""+filepath.Join(repoDir, "slf4j-api-2.0.13.jar")+":"+filepath.Join(repoDir, "logback-classic-1.5.6.jar")+"\" > \"$output\"\n")
+	if err := os.Chmod(filepath.Join(moduleRoot, "mvnw"), 0o755); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	server.handleInitialize(json.RawMessage(`1`), mustRawJSON(t, initializeParams{
+		RootURI: "file://" + moduleRoot,
+	}))
+
+	var openParams didOpenParams
+	openParams.TextDocument.URI = "file://" + sourcePath
+	openParams.TextDocument.LanguageID = "java"
+	openParams.TextDocument.Text = readFile(t, sourcePath)
+	server.handleDidOpen(context.Background(), mustRawJSON(t, openParams))
+
+	declaration := server.handleDeclaration(context.Background(), json.RawMessage(`2`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + sourcePath},
+		Position:     Position{Line: 7, Character: 12},
+	}))
+	if declaration == nil || declaration.Error != nil {
+		t.Fatalf("handleDeclaration() error = %#v", declaration)
+	}
+	declLocations, ok := declaration.Result.([]Location)
+	if !ok || len(declLocations) == 0 {
+		t.Fatalf("declaration locations = %#v", declaration.Result)
+	}
+	if got := declLocations[0].URI; !strings.HasSuffix(got, "/Logger.java") {
+		t.Fatalf("declaration uri = %q, want Logger.java", got)
+	}
+
+	implementation := server.handleImplementation(context.Background(), json.RawMessage(`3`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + sourcePath},
+		Position:     Position{Line: 7, Character: 12},
+	}))
+	if implementation == nil || implementation.Error != nil {
+		t.Fatalf("handleImplementation() error = %#v", implementation)
+	}
+	implLocations, ok := implementation.Result.([]Location)
+	if !ok || len(implLocations) == 0 {
+		t.Fatalf("implementation locations = %#v", implementation.Result)
+	}
+	if got := implLocations[0].URI; !strings.Contains(got, "logback-classic") {
+		t.Fatalf("implementation uri = %q, want logback-classic source", got)
+	}
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	return NewServer(engine.NewAnalyzer(
@@ -158,5 +226,69 @@ func writeFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	return string(data)
+}
+
+func buildFakeDependencyJars(t *testing.T, repoDir string) {
+	t.Helper()
+	writeZipFile(t, filepath.Join(repoDir, "slf4j-api-2.0.13.jar"), map[string]string{
+		"org/slf4j/Logger.class": "class bytes ignored",
+	})
+	writeZipFile(t, filepath.Join(repoDir, "slf4j-api-2.0.13-sources.jar"), map[string]string{
+		"org/slf4j/Logger.java": `package org.slf4j;
+
+public interface Logger {
+    void info(String message);
+}
+`,
+	})
+	writeZipFile(t, filepath.Join(repoDir, "logback-classic-1.5.6.jar"), map[string]string{
+		"ch/qos/logback/classic/Logger.class": "class bytes ignored",
+	})
+	writeZipFile(t, filepath.Join(repoDir, "logback-classic-1.5.6-sources.jar"), map[string]string{
+		"ch/qos/logback/classic/Logger.java": `package ch.qos.logback.classic;
+
+import org.slf4j.Logger;
+
+public class Logger implements Logger {
+    public void info(String message) {
+    }
+}
+`,
+	})
+}
+
+func writeZipFile(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer file.Close()
+
+	writer := zip.NewWriter(file)
+	for name, content := range files {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatalf("zip Create() error = %v", err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatalf("zip Write() error = %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip Close() error = %v", err)
 	}
 }

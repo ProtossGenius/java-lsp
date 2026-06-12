@@ -23,6 +23,7 @@ const textDocumentSyncFull = 1
 
 type Server struct {
 	analyzer       *engine.Analyzer
+	navigation     *navigationResolver
 	logger         *log.Logger
 	mu             sync.RWMutex
 	documents      map[string]openedDocument
@@ -56,9 +57,10 @@ type responseError struct {
 
 func NewServer(analyzer *engine.Analyzer) *Server {
 	return &Server{
-		analyzer:  analyzer,
-		logger:    log.New(os.Stderr, "java-lsp: ", 0),
-		documents: make(map[string]openedDocument),
+		analyzer:   analyzer,
+		navigation: newNavigationResolver(),
+		logger:     log.New(os.Stderr, "java-lsp: ", 0),
+		documents:  make(map[string]openedDocument),
 	}
 }
 
@@ -113,6 +115,12 @@ func (s *Server) handleMessage(ctx context.Context, message incomingMessage) (bo
 		return false, s.handleRename(message.ID, message.Params)
 	case "textDocument/signatureHelp":
 		return false, s.handleSignatureHelp(message.ID, message.Params)
+	case "textDocument/definition":
+		return false, s.handleDefinition(ctx, message.ID, message.Params)
+	case "textDocument/declaration":
+		return false, s.handleDeclaration(ctx, message.ID, message.Params)
+	case "textDocument/implementation":
+		return false, s.handleImplementation(ctx, message.ID, message.Params)
 	case "workspace/didRenameFiles":
 		s.handleDidRenameFiles(ctx, message.Params)
 		return false, nil
@@ -153,8 +161,11 @@ func (s *Server) handleInitialize(id json.RawMessage, raw json.RawMessage) *resp
 		ID:      id,
 		Result: map[string]any{
 			"capabilities": map[string]any{
-				"textDocumentSync": textDocumentSyncFull,
-				"renameProvider":   true,
+				"textDocumentSync":       textDocumentSyncFull,
+				"definitionProvider":     true,
+				"declarationProvider":    true,
+				"implementationProvider": true,
+				"renameProvider":         true,
 				"signatureHelpProvider": map[string]any{
 					"triggerCharacters": []string{"(", ","},
 				},
@@ -178,6 +189,55 @@ func (s *Server) handleInitialize(id json.RawMessage, raw json.RawMessage) *resp
 				"version": "0.2.0",
 			},
 		},
+	}
+}
+
+func (s *Server) handleDefinition(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {
+	return s.handleNavigation(ctx, id, raw, s.navigation.definition)
+}
+
+func (s *Server) handleDeclaration(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {
+	return s.handleNavigation(ctx, id, raw, s.navigation.declaration)
+}
+
+func (s *Server) handleImplementation(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {
+	return s.handleNavigation(ctx, id, raw, s.navigation.implementation)
+}
+
+func (s *Server) handleNavigation(
+	ctx context.Context,
+	id json.RawMessage,
+	raw json.RawMessage,
+	resolve func(context.Context, string, navigationRequest) ([]Location, error),
+) *responseMessage {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return invalidParamsResponse(id, err)
+	}
+
+	text, err := s.documentText(params.TextDocument.URI)
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+	path, ok := filePathFromURI(params.TextDocument.URI)
+	if !ok {
+		return internalErrorResponse(id, errors.New("unsupported document URI"))
+	}
+	root := s.workspaceRootForURI(params.TextDocument.URI)
+	locations, err := resolve(ctx, root, navigationRequest{
+		uri:      params.TextDocument.URI,
+		text:     text,
+		path:     path,
+		position: params.Position,
+	})
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+
+	return &responseMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  locations,
 	}
 }
 

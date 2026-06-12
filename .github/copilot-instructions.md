@@ -6,7 +6,7 @@
 - Run the full test suite with `go test ./...`.
 - Run a single package with `go test ./pkg/engine`.
 - Run a single test with `go test ./pkg/plugin/java -run TestGeneratedMethodsCreatesGetterForAnnotatedField`.
-- Run the LSP capability tests with `go test ./internal/lsp -run 'TestInitializeAdvertisesRenameAndSignatureHelp|TestRenameReturnsWorkspaceEditsAcrossFiles|TestSignatureHelpReturnsStringFormatSignature'`.
+- Run the LSP capability tests with `go test ./internal/lsp -run 'TestInitializeAdvertisesRenameAndSignatureHelp|TestRenameReturnsWorkspaceEditsAcrossFiles|TestSignatureHelpReturnsStringFormatSignature|TestDependencyDeclarationAndImplementationNavigateIntoSourceJars'`.
 - Run the Spring Boot fixture coverage with `go test ./pkg/engine -run TestAnalyzerIndexesSpringBootFixtures`.
 - Sync the upstream Java fixtures and regenerate the JDTLS unit-test manifest with `./scripts/sync_upstreams.sh`.
 - Verify compile-preserving rename refactors against the large Spring Petclinic project with `./scripts/verify_petclinic_refactor_compile.sh`.
@@ -16,7 +16,7 @@
 
 - `DESIGN.md` is still the architectural source of truth, and the current code now mirrors it with a first runnable slice.
 - `cmd/java-lsp` wires the application together and starts a minimal stdio LSP server.
-- `internal/lsp` implements the transport loop and currently handles `initialize`, `shutdown`, `exit`, `textDocument/didOpen`, `textDocument/didChange`, `textDocument/didClose`, `textDocument/rename`, `textDocument/signatureHelp`, and `workspace/didRenameFiles`.
+- `internal/lsp` implements the transport loop and currently handles `initialize`, `shutdown`, `exit`, `textDocument/didOpen`, `textDocument/didChange`, `textDocument/didClose`, `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/rename`, `textDocument/signatureHelp`, and `workspace/didRenameFiles`.
 - `pkg/syntax` defines the parser abstractions; `pkg/syntax/java` provides the first Java parser focused on packages, classes, fields, methods, and annotations.
 - `pkg/plugin` defines language plugin hooks; `pkg/plugin/java` owns Java-only semantics such as generated getters and binary-expression type inference.
 - `pkg/engine` is the orchestration layer: it parses a document, applies the language plugin, turns the result into persistent class/reference snapshots, and can walk an entire workspace tree to index project fixtures.
@@ -35,4 +35,4 @@
 - Keep proxy-aware external integration code flowing through `pkg/config` instead of scattering proxy parsing through plugins or transport code.
 - Prefer realistic project-shaped fixtures in `testdata/workspaces` when extending indexing behavior, especially for build-tool-aware or multi-file scenarios.
 - Keep large upstream codebases pinned as submodules under `third_party` rather than copying snapshots into the main tree; regenerate any derived manifests after updating them.
-- Fix editor integrations by adding real server capabilities instead of client-side fallbacks. Neovim currently depends on the server's actual `textDocument/rename`, `textDocument/signatureHelp`, and file-rename notification support.
+- Fix editor integrations by adding real server capabilities instead of client-side fallbacks. Neovim currently depends on the server's actual `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/rename`, `textDocument/signatureHelp`, and file-rename notification support.
