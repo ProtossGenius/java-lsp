@@ -1,0 +1,31 @@
+# Copilot Instructions
+
+## Build, test, and lint
+
+- Build the server with `go build ./...`.
+- Run the full test suite with `go test ./...`.
+- Run a single package with `go test ./pkg/engine`.
+- Run a single test with `go test ./pkg/plugin/java -run TestGeneratedMethodsCreatesGetterForAnnotatedField`.
+- Run the Spring Boot fixture coverage with `go test ./pkg/engine -run TestAnalyzerIndexesSpringBootFixtures`.
+- No project-specific linter is checked in yet. Do not assume `golangci-lint` or another linter is a repository requirement until config is added.
+
+## High-level architecture
+
+- `DESIGN.md` is still the architectural source of truth, and the current code now mirrors it with a first runnable slice.
+- `cmd/java-lsp` wires the application together and starts a minimal stdio LSP server.
+- `internal/lsp` implements the transport loop and currently handles `initialize`, `shutdown`, `exit`, `textDocument/didOpen`, `textDocument/didChange`, and `textDocument/didClose`.
+- `pkg/syntax` defines the parser abstractions; `pkg/syntax/java` provides the first Java parser focused on packages, classes, fields, methods, and annotations.
+- `pkg/plugin` defines language plugin hooks; `pkg/plugin/java` owns Java-only semantics such as generated getters and binary-expression type inference.
+- `pkg/engine` is the orchestration layer: it parses a document, applies the language plugin, turns the result into persistent class/reference snapshots, and can walk an entire workspace tree to index project fixtures.
+- `pkg/storage` defines the storage model and interface. `pkg/storage/pebble` is the embedded on-disk index store used by the CLI, while `pkg/storage` also includes an in-memory store for tests.
+- Proxy configuration is exposed as the `--proxy` flag and normalized in `pkg/config`.
+- `testdata/workspaces` contains realistic Maven- and Gradle-managed Spring Boot projects used as indexing fixtures.
+
+## Key conventions
+
+- Preserve the **engine vs. plugin** boundary: parsing/indexing orchestration belongs in `pkg/engine`, while Java-specific rules stay in `pkg/plugin/java`.
+- Keep syntax parsers language-focused and structural. The current Java parser intentionally extracts declarations and annotations without embedding semantic Java rules into the parser itself.
+- Treat generated members as first-class indexed output. The engine persists plugin-generated methods alongside declared methods and emits separate reference records for them.
+- Keep on-disk indexing behind the `storage.Store` interface so tests can stay fast with the in-memory store while the CLI uses the Pebble-backed store.
+- Keep proxy-aware external integration code flowing through `pkg/config` instead of scattering proxy parsing through plugins or transport code.
+- Prefer realistic project-shaped fixtures in `testdata/workspaces` when extending indexing behavior, especially for build-tool-aware or multi-file scenarios.
