@@ -75,7 +75,11 @@ func (s *Server) documentText(uri string) (string, error) {
 }
 
 func (s *Server) renameWorkspaceDocuments(root, requestURI, oldName, newName string) (map[string][]TextEdit, error) {
-	documents, err := s.workspaceDocuments(root, requestURI)
+	text, err := s.documentText(requestURI)
+	if err != nil {
+		return nil, err
+	}
+	documents, err := s.workspaceDocuments(root, requestURI, text)
 	if err != nil {
 		return nil, err
 	}
@@ -91,15 +95,11 @@ func (s *Server) renameWorkspaceDocuments(root, requestURI, oldName, newName str
 	return changes, nil
 }
 
-func (s *Server) workspaceDocuments(root, requestURI string) (map[string]string, error) {
+func (s *Server) workspaceDocuments(root, requestURI, requestText string) (map[string]string, error) {
 	documents := make(map[string]string)
 
 	if root == "" {
-		text, err := s.documentText(requestURI)
-		if err != nil {
-			return nil, err
-		}
-		documents[requestURI] = text
+		documents[requestURI] = requestText
 		return documents, nil
 	}
 
@@ -119,6 +119,10 @@ func (s *Server) workspaceDocuments(root, requestURI string) (map[string]string,
 		}
 
 		uri := fileURIFromPath(path)
+		if uri == requestURI {
+			documents[uri] = requestText
+			return nil
+		}
 		text, err := s.documentText(uri)
 		if err != nil {
 			return err

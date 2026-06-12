@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,6 +33,11 @@ func TestInitializeAdvertisesRenameAndSignatureHelp(t *testing.T) {
 		t.Fatalf("handleInitialize() result type = %T", response.Result)
 	}
 	capabilities := result["capabilities"].(map[string]any)
+	for _, key := range []string{"definitionProvider", "declarationProvider", "implementationProvider", "renameProvider"} {
+		if capabilities[key] != true {
+			t.Fatalf("%s = %#v, want true", key, capabilities[key])
+		}
+	}
 	if capabilities["renameProvider"] != true {
 		t.Fatalf("renameProvider = %#v, want true", capabilities["renameProvider"])
 	}
@@ -287,6 +293,73 @@ func writeZipFile(t *testing.T, path string, files map[string]string) {
 		if _, err := entry.Write([]byte(content)); err != nil {
 			t.Fatalf("zip Write() error = %v", err)
 		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip Close() error = %v", err)
+	}
+}
+
+func buildNoSourceDependencyJar(t *testing.T, repoDir string) {
+	t.Helper()
+	sourceDir := filepath.Join(repoDir, "src", "com", "acme")
+	writeFile(t, filepath.Join(sourceDir, "NoSourceGreeter.java"), `package com.acme;
+
+public class NoSourceGreeter {
+    public String greet(String name) {
+        return "hello " + name;
+    }
+}
+`)
+
+	classesDir := filepath.Join(repoDir, "classes")
+	if err := os.MkdirAll(classesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	cmd := exec.Command("javac", "-d", classesDir, filepath.Join(sourceDir, "NoSourceGreeter.java"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("javac error = %v (%s)", err, strings.TrimSpace(string(output)))
+	}
+
+	writeJarFromDirectory(t, filepath.Join(repoDir, "nosource-1.0.0.jar"), classesDir)
+}
+
+func writeJarFromDirectory(t *testing.T, jarPath, sourceDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(jarPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	file, err := os.Create(jarPath)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer file.Close()
+
+	writer := zip.NewWriter(file)
+	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+		entry, err := writer.Create(filepath.ToSlash(rel))
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		_, err = entry.Write(data)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("zip Close() error = %v", err)

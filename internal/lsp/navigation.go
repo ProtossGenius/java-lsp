@@ -23,8 +23,9 @@ type navigationResolver struct {
 }
 
 type moduleClasspath struct {
-	moduleRoot string
-	jars       []jarArtifact
+	moduleRoot  string
+	reactorRoot string
+	jars        []jarArtifact
 }
 
 type jarArtifact struct {
@@ -71,7 +72,7 @@ func (r *navigationResolver) definition(ctx context.Context, root string, req na
 		if err != nil {
 			return nil, err
 		}
-		return r.locationsForTypeMember(ctx, req.path, receiverType, member.member)
+		return r.locationsForTypeMember(ctx, root, req.path, receiverType, member.member)
 	}
 
 	identifier, err := wordAtPosition(req.text, req.position)
@@ -82,7 +83,7 @@ func (r *navigationResolver) definition(ctx context.Context, root string, req na
 	if fqcn == "" {
 		return nil, errors.New("could not resolve type at cursor")
 	}
-	location, err := r.locationForTypeDeclaration(ctx, req.path, fqcn)
+	location, err := r.locationForTypeDeclaration(ctx, root, req.path, fqcn)
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +110,15 @@ func (r *navigationResolver) implementation(ctx context.Context, root string, re
 		return nil, err
 	}
 
+	workspaceDocs, err := workspaceDocumentsForRoot(root, req.uri, req.text)
+	if err != nil {
+		return nil, err
+	}
+	workspaceImplementations := workspaceImplementationsForTypeMember(workspaceDocs, receiverType, member.member)
+	if len(workspaceImplementations) > 0 {
+		return workspaceImplementations, nil
+	}
+
 	module, err := r.moduleForPath(ctx, req.path)
 	if err != nil {
 		return nil, err
@@ -122,18 +132,23 @@ func (r *navigationResolver) implementation(ctx context.Context, root string, re
 		return implementations, nil
 	}
 
-	return r.locationsForTypeMember(ctx, req.path, receiverType, member.member)
+	return r.locationsForTypeMember(ctx, root, req.path, receiverType, member.member)
 }
 
-func (r *navigationResolver) locationsForTypeMember(ctx context.Context, path, fqcn, member string) ([]Location, error) {
-	location, err := r.locationForTypeMember(ctx, path, fqcn, member)
+func (r *navigationResolver) locationsForTypeMember(ctx context.Context, root, path, fqcn, member string) ([]Location, error) {
+	location, err := r.locationForTypeMember(ctx, root, path, fqcn, member)
 	if err != nil {
 		return nil, err
 	}
 	return []Location{location}, nil
 }
 
-func (r *navigationResolver) locationForTypeDeclaration(ctx context.Context, path, fqcn string) (Location, error) {
+func (r *navigationResolver) locationForTypeDeclaration(ctx context.Context, root, path, fqcn string) (Location, error) {
+	if location, ok, err := workspaceLocationForTypeDeclaration(root, fqcn); err != nil {
+		return Location{}, err
+	} else if ok {
+		return location, nil
+	}
 	sourcePath, err := r.materializeTypeSource(ctx, path, fqcn)
 	if err != nil {
 		return Location{}, err
@@ -142,7 +157,12 @@ func (r *navigationResolver) locationForTypeDeclaration(ctx context.Context, pat
 	return locationForLine(sourcePath, line), nil
 }
 
-func (r *navigationResolver) locationForTypeMember(ctx context.Context, path, fqcn, member string) (Location, error) {
+func (r *navigationResolver) locationForTypeMember(ctx context.Context, root, path, fqcn, member string) (Location, error) {
+	if location, ok, err := workspaceLocationForTypeMember(root, fqcn, member); err != nil {
+		return Location{}, err
+	} else if ok {
+		return location, nil
+	}
 	sourcePath, err := r.materializeTypeSource(ctx, path, fqcn)
 	if err != nil {
 		return Location{}, err
@@ -216,6 +236,141 @@ func (r *navigationResolver) implementationsForTypeMember(ctx context.Context, m
 	return locations, nil
 }
 
+func workspaceLocationForTypeDeclaration(root, fqcn string) (Location, bool, error) {
+	if root == "" {
+		return Location{}, false, nil
+	}
+	documents, err := workspaceDocumentsForRoot(root, "", "")
+	if err != nil {
+		return Location{}, false, err
+	}
+	for uri, content := range documents {
+		ctx := parseSourceContext(content)
+		className := parseDeclaredTypeName(content)
+		if className == "" {
+			continue
+		}
+		resolved := className
+		if ctx.packageName != "" {
+			resolved = ctx.packageName + "." + className
+		}
+		if resolved != fqcn {
+			continue
+		}
+		path, ok := filePathFromURI(uri)
+		if !ok {
+			continue
+		}
+		return locationForLine(path, findClassLine(content, className)), true, nil
+	}
+	return Location{}, false, nil
+}
+
+func workspaceLocationForTypeMember(root, fqcn, member string) (Location, bool, error) {
+	if root == "" {
+		return Location{}, false, nil
+	}
+	documents, err := workspaceDocumentsForRoot(root, "", "")
+	if err != nil {
+		return Location{}, false, err
+	}
+	for uri, content := range documents {
+		ctx := parseSourceContext(content)
+		className := parseDeclaredTypeName(content)
+		if className == "" {
+			continue
+		}
+		resolved := className
+		if ctx.packageName != "" {
+			resolved = ctx.packageName + "." + className
+		}
+		if resolved != fqcn {
+			continue
+		}
+		line := findMemberLine(content, member)
+		if line == 0 {
+			line = findClassLine(content, className)
+		}
+		path, ok := filePathFromURI(uri)
+		if !ok {
+			continue
+		}
+		return locationForLine(path, line), true, nil
+	}
+	return Location{}, false, nil
+}
+
+func workspaceDocumentsForRoot(root, requestURI, requestText string) (map[string]string, error) {
+	documents := make(map[string]string)
+
+	if root == "" {
+		documents[requestURI] = requestText
+		return documents, nil
+	}
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".gradle", "build", "target":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".java" {
+			return nil
+		}
+
+		uri := fileURIFromPath(path)
+		if uri == requestURI {
+			documents[uri] = requestText
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		documents[uri] = string(data)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return documents, nil
+}
+
+func workspaceImplementationsForTypeMember(documents map[string]string, fqcn, member string) []Location {
+	locations := make([]Location, 0)
+	targetSimple := simpleName(fqcn)
+
+	for uri, content := range documents {
+		implementsTarget, resolvedFQCN := sourceImplementsType(content, fqcn, targetSimple)
+		if !implementsTarget {
+			continue
+		}
+		line := findMemberLine(content, member)
+		if line == 0 {
+			line = findClassLine(content, simpleName(resolvedFQCN))
+		}
+		path, ok := filePathFromURI(uri)
+		if !ok {
+			continue
+		}
+		locations = append(locations, locationForLine(path, line))
+	}
+
+	sort.Slice(locations, func(i, j int) bool {
+		if locations[i].URI != locations[j].URI {
+			return locations[i].URI < locations[j].URI
+		}
+		return locations[i].Range.Start.Line < locations[j].Range.Start.Line
+	})
+	return locations
+}
+
 func (r *navigationResolver) materializeTypeSource(ctx context.Context, path, fqcn string) (string, error) {
 	module, err := r.moduleForPath(ctx, path)
 	if err != nil {
@@ -251,9 +406,12 @@ func (r *navigationResolver) materializeTypeSource(ctx context.Context, path, fq
 }
 
 func (r *navigationResolver) moduleForPath(ctx context.Context, path string) (*moduleClasspath, error) {
-	moduleRoot := findModuleRoot(path)
+	moduleRoot, reactorRoot := findMavenRoots(path)
 	if moduleRoot == "" {
 		return nil, errors.New("could not find Maven module root for file")
+	}
+	if reactorRoot == "" {
+		reactorRoot = moduleRoot
 	}
 
 	r.mu.Lock()
@@ -263,19 +421,20 @@ func (r *navigationResolver) moduleForPath(ctx context.Context, path string) (*m
 		return module, nil
 	}
 
-	jars, err := buildMavenClasspath(ctx, moduleRoot)
+	jars, err := buildMavenClasspath(ctx, moduleRoot, reactorRoot)
 	if err != nil {
 		return nil, err
 	}
 	module := &moduleClasspath{
-		moduleRoot: moduleRoot,
-		jars:       jars,
+		moduleRoot:  moduleRoot,
+		reactorRoot: reactorRoot,
+		jars:        jars,
 	}
 	r.classpath[moduleRoot] = module
 	return module, nil
 }
 
-func buildMavenClasspath(ctx context.Context, moduleRoot string) ([]jarArtifact, error) {
+func buildMavenClasspath(ctx context.Context, moduleRoot, reactorRoot string) ([]jarArtifact, error) {
 	tempDir, err := os.MkdirTemp("", "java-lsp-classpath-*")
 	if err != nil {
 		return nil, err
@@ -284,29 +443,47 @@ func buildMavenClasspath(ctx context.Context, moduleRoot string) ([]jarArtifact,
 
 	outputFile := filepath.Join(tempDir, "classpath.txt")
 	command := "mvn"
-	if wrapper := findMavenWrapper(moduleRoot); wrapper != "" {
+	if wrapper := findMavenWrapper(reactorRoot); wrapper != "" {
 		command = wrapper
 	}
 
-	args := []string{
+	args := make([]string, 0, 8)
+	if reactorRoot != moduleRoot {
+		relativeModule, err := filepath.Rel(reactorRoot, moduleRoot)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "-pl", filepath.ToSlash(relativeModule), "-am")
+	}
+	args = append(args,
 		"-q",
 		"-DskipTests",
 		"dependency:build-classpath",
 		"-Dmdep.outputFile=" + outputFile,
-	}
+	)
 	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Dir = moduleRoot
+	cmd.Dir = reactorRoot
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("build Maven classpath: %w (%s)", err, strings.TrimSpace(stderr.String()))
+		if data, readErr := os.ReadFile(outputFile); readErr == nil && strings.TrimSpace(string(data)) != "" {
+			return parseClasspathArtifacts(string(data)), nil
+		}
+		output := strings.TrimSpace(strings.Join([]string{stdout.String(), stderr.String()}, "\n"))
+		return nil, fmt.Errorf("build Maven classpath: %w (%s)", err, output)
 	}
 
 	data, err := os.ReadFile(outputFile)
 	if err != nil {
 		return nil, err
 	}
-	entries := strings.Split(strings.TrimSpace(string(data)), string(os.PathListSeparator))
+	return parseClasspathArtifacts(string(data)), nil
+}
+
+func parseClasspathArtifacts(classpath string) []jarArtifact {
+	entries := strings.Split(strings.TrimSpace(classpath), string(os.PathListSeparator))
 	jars := make([]jarArtifact, 0, len(entries))
 	for _, entry := range entries {
 		entry = strings.TrimSpace(entry)
@@ -318,18 +495,23 @@ func buildMavenClasspath(ctx context.Context, moduleRoot string) ([]jarArtifact,
 			sourceJarPath: sourceJarPathFor(entry),
 		})
 	}
-	return jars, nil
+	return jars
 }
 
-func findModuleRoot(path string) string {
+func findMavenRoots(path string) (string, string) {
 	current := filepath.Dir(path)
+	moduleRoot := ""
+	reactorRoot := ""
 	for {
 		if stat, err := os.Stat(filepath.Join(current, "pom.xml")); err == nil && !stat.IsDir() {
-			return current
+			if moduleRoot == "" {
+				moduleRoot = current
+			}
+			reactorRoot = current
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return ""
+			return moduleRoot, reactorRoot
 		}
 		current = parent
 	}
