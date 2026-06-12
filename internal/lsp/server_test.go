@@ -38,6 +38,9 @@ func TestInitializeAdvertisesRenameAndSignatureHelp(t *testing.T) {
 			t.Fatalf("%s = %#v, want true", key, capabilities[key])
 		}
 	}
+	if _, ok := capabilities["completionProvider"].(map[string]any); !ok {
+		t.Fatalf("completionProvider type = %T", capabilities["completionProvider"])
+	}
 	if capabilities["renameProvider"] != true {
 		t.Fatalf("renameProvider = %#v, want true", capabilities["renameProvider"])
 	}
@@ -204,6 +207,64 @@ public class DemoApplication {
 	}
 	if got := implLocations[0].URI; !strings.Contains(got, "logback-classic") {
 		t.Fatalf("implementation uri = %q, want logback-classic source", got)
+	}
+}
+
+func TestCompletionReturnsLoggerMembers(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	moduleRoot := filepath.Join(root, "demo")
+	repoDir := filepath.Join(root, "repo")
+	sourcePath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "DemoApplication.java")
+
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, sourcePath, `package com.example.demo;
+
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
+public class DemoApplication {
+    void run() {
+        log.
+    }
+}
+`)
+	buildFakeDependencyJars(t, repoDir)
+	writeMavenWrapper(t, moduleRoot, []string{
+		filepath.Join(repoDir, "slf4j-api-2.0.13.jar"),
+		filepath.Join(repoDir, "logback-classic-1.5.6.jar"),
+	})
+
+	server.handleInitialize(json.RawMessage(`1`), mustRawJSON(t, initializeParams{
+		RootURI: "file://" + moduleRoot,
+	}))
+
+	var openParams didOpenParams
+	openParams.TextDocument.URI = "file://" + sourcePath
+	openParams.TextDocument.LanguageID = "java"
+	openParams.TextDocument.Text = readFile(t, sourcePath)
+	server.handleDidOpen(context.Background(), mustRawJSON(t, openParams))
+
+	response := server.handleCompletion(context.Background(), json.RawMessage(`2`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + sourcePath},
+		Position:     Position{Line: 7, Character: 12},
+	}))
+	if response == nil || response.Error != nil {
+		t.Fatalf("handleCompletion() error = %#v", response)
+	}
+	list, ok := response.Result.(*CompletionList)
+	if !ok {
+		t.Fatalf("completion result type = %T", response.Result)
+	}
+	found := false
+	for _, item := range list.Items {
+		if item.Label == "info" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("completion items = %#v, want info", list.Items)
 	}
 }
 

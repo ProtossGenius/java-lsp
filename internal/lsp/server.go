@@ -121,6 +121,8 @@ func (s *Server) handleMessage(ctx context.Context, message incomingMessage) (bo
 		return false, s.handleDeclaration(ctx, message.ID, message.Params)
 	case "textDocument/implementation":
 		return false, s.handleImplementation(ctx, message.ID, message.Params)
+	case "textDocument/completion":
+		return false, s.handleCompletion(ctx, message.ID, message.Params)
 	case "workspace/didRenameFiles":
 		s.handleDidRenameFiles(ctx, message.Params)
 		return false, nil
@@ -165,7 +167,10 @@ func (s *Server) handleInitialize(id json.RawMessage, raw json.RawMessage) *resp
 				"definitionProvider":     true,
 				"declarationProvider":    true,
 				"implementationProvider": true,
-				"renameProvider":         true,
+				"completionProvider": map[string]any{
+					"triggerCharacters": []string{"."},
+				},
+				"renameProvider": true,
 				"signatureHelpProvider": map[string]any{
 					"triggerCharacters": []string{"(", ","},
 				},
@@ -202,6 +207,37 @@ func (s *Server) handleDeclaration(ctx context.Context, id json.RawMessage, raw 
 
 func (s *Server) handleImplementation(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {
 	return s.handleNavigation(ctx, id, raw, s.navigation.implementation)
+}
+
+func (s *Server) handleCompletion(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return invalidParamsResponse(id, err)
+	}
+
+	text, err := s.documentText(params.TextDocument.URI)
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+	path, ok := filePathFromURI(params.TextDocument.URI)
+	if !ok {
+		return internalErrorResponse(id, errors.New("unsupported document URI"))
+	}
+	root := s.workspaceRootForURI(params.TextDocument.URI)
+	result, err := completionAtPosition(ctx, s.navigation, root, navigationRequest{
+		uri:      params.TextDocument.URI,
+		text:     text,
+		path:     path,
+		position: params.Position,
+	})
+	if err != nil {
+		return internalErrorResponse(id, err)
+	}
+	return &responseMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  result,
+	}
 }
 
 func (s *Server) handleNavigation(

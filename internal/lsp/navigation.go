@@ -50,6 +50,12 @@ type navigationRequest struct {
 type memberAccess struct {
 	receiver string
 	member   string
+	focus    string
+}
+
+type implementationCandidate struct {
+	location Location
+	score    int
 }
 
 var fieldDeclRE = regexp.MustCompile(`^\s*(?:public|protected|private|static|final|transient|volatile|\s)+([A-Za-z_][A-Za-z0-9_<>\[\].?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^;]*)?;`)
@@ -71,6 +77,13 @@ func (r *navigationResolver) definition(ctx context.Context, root string, req na
 		receiverType, err := resolveReceiverType(req.text, contextInfo, member.receiver)
 		if err != nil {
 			return nil, err
+		}
+		if member.focus == "receiver" {
+			location, err := r.locationForTypeDeclaration(ctx, root, req.path, receiverType)
+			if err != nil {
+				return nil, err
+			}
+			return []Location{location}, nil
 		}
 		return r.locationsForTypeMember(ctx, root, req.path, receiverType, member.member)
 	}
@@ -176,7 +189,7 @@ func (r *navigationResolver) locationForTypeMember(ctx context.Context, root, pa
 }
 
 func (r *navigationResolver) implementationsForTypeMember(ctx context.Context, module *moduleClasspath, fqcn, member string) ([]Location, error) {
-	locations := make([]Location, 0)
+	candidates := make([]implementationCandidate, 0)
 	seen := map[string]struct{}{}
 	targetSimple := simpleName(fqcn)
 
@@ -220,19 +233,29 @@ func (r *navigationResolver) implementationsForTypeMember(ctx context.Context, m
 			if line == 0 {
 				line = findClassLine(content, simpleName(resolvedFQCN))
 			}
-			locations = append(locations, locationForLine(sourcePath, line))
+			candidates = append(candidates, implementationCandidate{
+				location: locationForLine(sourcePath, line),
+				score:    implementationScore(content),
+			})
 		}
 
 		reader.Close()
 	}
 
-	sort.Slice(locations, func(i, j int) bool {
-		if locations[i].URI != locations[j].URI {
-			return locations[i].URI < locations[j].URI
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
 		}
-		return locations[i].Range.Start.Line < locations[j].Range.Start.Line
+		if candidates[i].location.URI != candidates[j].location.URI {
+			return candidates[i].location.URI < candidates[j].location.URI
+		}
+		return candidates[i].location.Range.Start.Line < candidates[j].location.Range.Start.Line
 	})
 
+	locations := make([]Location, 0, len(candidates))
+	for _, candidate := range candidates {
+		locations = append(locations, candidate.location)
+	}
 	return locations, nil
 }
 
@@ -343,7 +366,7 @@ func workspaceDocumentsForRoot(root, requestURI, requestText string) (map[string
 }
 
 func workspaceImplementationsForTypeMember(documents map[string]string, fqcn, member string) []Location {
-	locations := make([]Location, 0)
+	candidates := make([]implementationCandidate, 0)
 	targetSimple := simpleName(fqcn)
 
 	for uri, content := range documents {
@@ -359,15 +382,25 @@ func workspaceImplementationsForTypeMember(documents map[string]string, fqcn, me
 		if !ok {
 			continue
 		}
-		locations = append(locations, locationForLine(path, line))
+		candidates = append(candidates, implementationCandidate{
+			location: locationForLine(path, line),
+			score:    implementationScore(content),
+		})
 	}
 
-	sort.Slice(locations, func(i, j int) bool {
-		if locations[i].URI != locations[j].URI {
-			return locations[i].URI < locations[j].URI
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
 		}
-		return locations[i].Range.Start.Line < locations[j].Range.Start.Line
+		if candidates[i].location.URI != candidates[j].location.URI {
+			return candidates[i].location.URI < candidates[j].location.URI
+		}
+		return candidates[i].location.Range.Start.Line < candidates[j].location.Range.Start.Line
 	})
+	locations := make([]Location, 0, len(candidates))
+	for _, candidate := range candidates {
+		locations = append(locations, candidate.location)
+	}
 	return locations
 }
 
@@ -403,6 +436,19 @@ func (r *navigationResolver) materializeTypeSource(ctx context.Context, path, fq
 	}
 
 	return "", fmt.Errorf("type %s not found on dependency classpath", fqcn)
+}
+
+func (r *navigationResolver) sourcePathForType(ctx context.Context, root, path, fqcn string) (string, error) {
+	if location, ok, err := workspaceLocationForTypeDeclaration(root, fqcn); err != nil {
+		return "", err
+	} else if ok {
+		sourcePath, ok := filePathFromURI(location.URI)
+		if !ok {
+			return "", fmt.Errorf("unsupported workspace URI for %s", fqcn)
+		}
+		return sourcePath, nil
+	}
+	return r.materializeTypeSource(ctx, path, fqcn)
 }
 
 func (r *navigationResolver) moduleForPath(ctx context.Context, path string) (*moduleClasspath, error) {
@@ -459,7 +505,7 @@ func buildMavenClasspath(ctx context.Context, moduleRoot, reactorRoot string) ([
 		"-q",
 		"-DskipTests",
 		"dependency:build-classpath",
-		"-Dmdep.outputFile=" + outputFile,
+		"-Dmdep.outputFile="+outputFile,
 	)
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = reactorRoot
@@ -724,32 +770,62 @@ func memberAccessAtPosition(text string, pos Position) (memberAccess, bool, erro
 	if !isJavaIdentifierPart(lineRunes[index]) && index > 0 && isJavaIdentifierPart(lineRunes[index-1]) {
 		index--
 	}
-	start := index
-	for start > 0 && isJavaIdentifierPart(lineRunes[start-1]) {
-		start--
+	tokenStart := index
+	for tokenStart > 0 && isJavaIdentifierPart(lineRunes[tokenStart-1]) {
+		tokenStart--
 	}
-	end := index + 1
-	for end < len(lineRunes) && isJavaIdentifierPart(lineRunes[end]) {
-		end++
+	tokenEnd := index + 1
+	for tokenEnd < len(lineRunes) && isJavaIdentifierPart(lineRunes[tokenEnd]) {
+		tokenEnd++
 	}
-
-	if start == end || start == 0 || lineRunes[start-1] != '.' {
+	if tokenStart == tokenEnd {
 		return memberAccess{}, false, nil
 	}
 
-	receiverEnd := start - 1
-	receiverStart := receiverEnd
-	for receiverStart > 0 && isJavaIdentifierPart(lineRunes[receiverStart-1]) {
-		receiverStart--
-	}
-	if receiverStart == receiverEnd {
+	receiverStart, receiverEnd, memberStart, memberEnd, ok := surroundingMemberAccess(lineRunes, tokenStart, tokenEnd)
+	if !ok {
 		return memberAccess{}, false, nil
+	}
+	focus := "member"
+	if tokenStart == receiverStart && tokenEnd == receiverEnd {
+		focus = "receiver"
 	}
 
 	return memberAccess{
 		receiver: string(lineRunes[receiverStart:receiverEnd]),
-		member:   string(lineRunes[start:end]),
+		member:   string(lineRunes[memberStart:memberEnd]),
+		focus:    focus,
 	}, true, nil
+}
+
+func surroundingMemberAccess(lineRunes []rune, tokenStart, tokenEnd int) (int, int, int, int, bool) {
+	if tokenEnd < len(lineRunes) && lineRunes[tokenEnd] == '.' {
+		receiverStart := tokenStart
+		receiverEnd := tokenEnd
+		memberStart := tokenEnd + 1
+		memberEnd := memberStart
+		for memberEnd < len(lineRunes) && isJavaIdentifierPart(lineRunes[memberEnd]) {
+			memberEnd++
+		}
+		if memberStart < memberEnd {
+			return receiverStart, receiverEnd, memberStart, memberEnd, true
+		}
+	}
+
+	if tokenStart > 0 && lineRunes[tokenStart-1] == '.' {
+		memberStart := tokenStart
+		memberEnd := tokenEnd
+		receiverEnd := tokenStart - 1
+		receiverStart := receiverEnd
+		for receiverStart > 0 && isJavaIdentifierPart(lineRunes[receiverStart-1]) {
+			receiverStart--
+		}
+		if receiverStart < receiverEnd {
+			return receiverStart, receiverEnd, memberStart, memberEnd, true
+		}
+	}
+
+	return 0, 0, 0, 0, false
 }
 
 func readZipFile(file *zip.File) (string, error) {
@@ -821,6 +897,34 @@ func parseDeclaredTypeName(header string) string {
 		if index := strings.Index(header, keyword+" "); index >= 0 {
 			rest := strings.TrimSpace(header[index+len(keyword)+1:])
 			if rest == "" {
+				return ""
+			}
+
+			func implementationScore(content string) int {
+				score := 0
+				header := firstTypeHeader(content)
+				if strings.Contains(header, "abstract class") {
+					score -= 100
+				} else if strings.Contains(header, " class ") || strings.HasPrefix(strings.TrimSpace(header), "class ") {
+					score += 100
+				}
+				ctx := parseSourceContext(content)
+				if strings.Contains(ctx.packageName, ".helpers") {
+					score -= 40
+				}
+				if strings.Contains(ctx.packageName, "logback") {
+					score += 40
+				}
+				return score
+			}
+
+			func firstTypeHeader(content string) string {
+				for _, line := range strings.Split(content, "\n") {
+					trimmed := strings.TrimSpace(line)
+					if strings.Contains(trimmed, " class ") || strings.Contains(trimmed, " interface ") || strings.Contains(trimmed, " record ") || strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "interface ") || strings.HasPrefix(trimmed, "record ") || strings.HasPrefix(trimmed, "abstract class ") {
+						return trimmed
+					}
+				}
 				return ""
 			}
 			return strings.Fields(rest)[0]
