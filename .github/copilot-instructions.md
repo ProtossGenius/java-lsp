@@ -7,6 +7,8 @@
 - Run a single package with `go test ./pkg/engine`.
 - Run a single test with `go test ./pkg/plugin/java -run TestGeneratedMethodsCreatesGetterForAnnotatedField`.
 - Run the Spring Boot fixture coverage with `go test ./pkg/engine -run TestAnalyzerIndexesSpringBootFixtures`.
+- Sync the upstream Java fixtures and regenerate the JDTLS unit-test manifest with `./scripts/sync_upstreams.sh`.
+- Verify compile-preserving rename refactors against the large Spring Petclinic project with `./scripts/verify_petclinic_refactor_compile.sh`.
 - No project-specific linter is checked in yet. Do not assume `golangci-lint` or another linter is a repository requirement until config is added.
 
 ## High-level architecture
@@ -20,6 +22,8 @@
 - `pkg/storage` defines the storage model and interface. `pkg/storage/pebble` is the embedded on-disk index store used by the CLI, while `pkg/storage` also includes an in-memory store for tests.
 - Proxy configuration is exposed as the `--proxy` flag and normalized in `pkg/config`.
 - `testdata/workspaces` contains realistic Maven- and Gradle-managed Spring Boot projects used as indexing fixtures.
+- `third_party/spring-petclinic` is the large upstream compile/regression fixture. `scripts/verify_petclinic_refactor_compile.sh` copies it to a temp workspace, applies deterministic rename refactors, then recompiles it.
+- `third_party/eclipse.jdt.ls` is the upstream JDTLS source tree. `testdata/manifests/jdtls-ut-files.txt` is the generated inventory of all imported JDTLS unit-test source files from the pinned upstream commit.
 
 ## Key conventions
 
@@ -29,3 +33,4 @@
 - Keep on-disk indexing behind the `storage.Store` interface so tests can stay fast with the in-memory store while the CLI uses the Pebble-backed store.
 - Keep proxy-aware external integration code flowing through `pkg/config` instead of scattering proxy parsing through plugins or transport code.
 - Prefer realistic project-shaped fixtures in `testdata/workspaces` when extending indexing behavior, especially for build-tool-aware or multi-file scenarios.
+- Keep large upstream codebases pinned as submodules under `third_party` rather than copying snapshots into the main tree; regenerate any derived manifests after updating them.

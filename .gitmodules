@@ -1,0 +1,8 @@
+[submodule "third_party/eclipse.jdt.ls"]
+	path = third_party/eclipse.jdt.ls
+	url = https://github.com/eclipse-jdtls/eclipse.jdt.ls.git
+	branch = main
+[submodule "third_party/spring-petclinic"]
+	path = third_party/spring-petclinic
+	url = https://github.com/spring-projects/spring-petclinic.git
+	branch = main

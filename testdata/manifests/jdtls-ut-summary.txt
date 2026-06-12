@@ -1,0 +1,4 @@
+upstream_repo: eclipse-jdtls/eclipse.jdt.ls
+upstream_commit: e3cf69c4afea7ba18f7f24b827995fcba6606c87
+unit_test_file_count: 269
+manifest: testdata/manifests/jdtls-ut-files.txt
