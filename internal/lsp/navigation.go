@@ -843,12 +843,7 @@ func readZipFile(file *zip.File) (string, error) {
 
 func sourceImplementsType(content, targetFQCN, targetSimple string) (bool, string) {
 	ctx := parseSourceContext(content)
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		if !strings.Contains(line, "class ") && !strings.Contains(line, "interface ") && !strings.Contains(line, "record ") {
-			continue
-		}
-		header := line
+	for _, header := range typeHeaders(content) {
 		if !strings.Contains(header, "implements") && !strings.Contains(header, "extends") {
 			continue
 		}
@@ -899,38 +894,58 @@ func parseDeclaredTypeName(header string) string {
 			if rest == "" {
 				return ""
 			}
-
-			func implementationScore(content string) int {
-				score := 0
-				header := firstTypeHeader(content)
-				if strings.Contains(header, "abstract class") {
-					score -= 100
-				} else if strings.Contains(header, " class ") || strings.HasPrefix(strings.TrimSpace(header), "class ") {
-					score += 100
-				}
-				ctx := parseSourceContext(content)
-				if strings.Contains(ctx.packageName, ".helpers") {
-					score -= 40
-				}
-				if strings.Contains(ctx.packageName, "logback") {
-					score += 40
-				}
-				return score
-			}
-
-			func firstTypeHeader(content string) string {
-				for _, line := range strings.Split(content, "\n") {
-					trimmed := strings.TrimSpace(line)
-					if strings.Contains(trimmed, " class ") || strings.Contains(trimmed, " interface ") || strings.Contains(trimmed, " record ") || strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "interface ") || strings.HasPrefix(trimmed, "record ") || strings.HasPrefix(trimmed, "abstract class ") {
-						return trimmed
-					}
-				}
-				return ""
-			}
 			return strings.Fields(rest)[0]
 		}
 	}
 	return ""
+}
+
+func implementationScore(content string) int {
+	score := 0
+	header := firstTypeHeader(content)
+	if strings.Contains(header, "abstract class") {
+		score -= 100
+	} else if strings.Contains(header, " class ") || strings.HasPrefix(strings.TrimSpace(header), "class ") {
+		score += 100
+	}
+	ctx := parseSourceContext(content)
+	if strings.Contains(ctx.packageName, ".helpers") {
+		score -= 40
+	}
+	if strings.Contains(ctx.packageName, "logback") {
+		score += 40
+	}
+	return score
+}
+
+func firstTypeHeader(content string) string {
+	headers := typeHeaders(content)
+	if len(headers) > 0 {
+		return headers[0]
+	}
+	return ""
+}
+
+func typeHeaders(content string) []string {
+	lines := strings.Split(content, "\n")
+	headers := make([]string, 0)
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if !strings.Contains(trimmed, "class ") && !strings.Contains(trimmed, "interface ") && !strings.Contains(trimmed, "record ") && !strings.HasPrefix(trimmed, "abstract class ") {
+			continue
+		}
+		header := trimmed
+		for !strings.Contains(header, "{") && i+1 < len(lines) {
+			i++
+			header += " " + strings.TrimSpace(lines[i])
+		}
+		headers = append(headers, compactWhitespace(header))
+	}
+	return headers
+}
+
+func compactWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func findClassLine(content, className string) int {

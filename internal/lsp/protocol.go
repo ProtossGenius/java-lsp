@@ -70,6 +70,18 @@ type Location struct {
 	Range Range  `json:"range"`
 }
 
+type Diagnostic struct {
+	Range    Range  `json:"range"`
+	Severity int    `json:"severity,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Message  string `json:"message"`
+}
+
+type publishDiagnosticsParams struct {
+	URI         string       `json:"uri"`
+	Diagnostics []Diagnostic `json:"diagnostics"`
+}
+
 type renameParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
 	Position     Position               `json:"position"`

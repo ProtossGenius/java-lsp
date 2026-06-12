@@ -6,7 +6,7 @@
 - Run the full test suite with `go test ./...`.
 - Run a single package with `go test ./pkg/engine`.
 - Run a single test with `go test ./pkg/plugin/java -run TestGeneratedMethodsCreatesGetterForAnnotatedField`.
-- Run the LSP capability tests with `go test ./internal/lsp -run 'TestInitializeAdvertisesRenameAndSignatureHelp|TestRenameReturnsWorkspaceEditsAcrossFiles|TestSignatureHelpReturnsStringFormatSignature|TestDependencyDeclarationAndImplementationNavigateIntoSourceJars'`.
+- Run the LSP capability tests with `go test ./internal/lsp -run 'TestInitializeAdvertisesRenameAndSignatureHelp|TestRenameReturnsWorkspaceEditsAcrossFiles|TestSignatureHelpReturnsStringFormatSignature|TestDependencyDeclarationAndImplementationNavigateIntoSourceJars|TestCompletionReturnsLoggerMembers|TestCompletionIncludesLombokDataAccessorsAndSnippets|TestCompletionRanksMethodsByExpectedType|TestDiagnosticsReportUnresolvedTypes'`.
 - Run the full LSP lifecycle fixture tests with `go test ./internal/lsp -run 'TestWorkspaceLifecycleAndNavigationCoverage|TestDependencyDefinitionFallsBackToDecompiledClassWithoutSources|TestServeHandlesShutdownAndExit'`.
 - Run the Spring Boot fixture coverage with `go test ./pkg/engine -run TestAnalyzerIndexesSpringBootFixtures`.
 - Sync the upstream Java fixtures and regenerate the JDTLS unit-test manifest with `./scripts/sync_upstreams.sh`.
@@ -17,7 +17,7 @@
 
 - `DESIGN.md` is still the architectural source of truth, and the current code now mirrors it with a first runnable slice.
 - `cmd/java-lsp` wires the application together and starts a minimal stdio LSP server.
-- `internal/lsp` implements the transport loop and currently handles `initialize`, `shutdown`, `exit`, `textDocument/didOpen`, `textDocument/didChange`, `textDocument/didClose`, `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/rename`, `textDocument/signatureHelp`, and `workspace/didRenameFiles`.
+- `internal/lsp` implements the transport loop and currently handles `initialize`, `shutdown`, `exit`, `textDocument/didOpen`, `textDocument/didChange`, `textDocument/didClose`, `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/completion`, `textDocument/rename`, `textDocument/signatureHelp`, and `workspace/didRenameFiles`. It also publishes `textDocument/publishDiagnostics`.
 - `pkg/syntax` defines the parser abstractions; `pkg/syntax/java` provides the first Java parser focused on packages, classes, fields, methods, and annotations.
 - `pkg/plugin` defines language plugin hooks; `pkg/plugin/java` owns Java-only semantics such as generated getters and binary-expression type inference.
 - `pkg/engine` is the orchestration layer: it parses a document, applies the language plugin, turns the result into persistent class/reference snapshots, and can walk an entire workspace tree to index project fixtures.
@@ -39,3 +39,4 @@
 - Keep large upstream codebases pinned as submodules under `third_party` rather than copying snapshots into the main tree; regenerate any derived manifests after updating them.
 - Fix editor integrations by adding real server capabilities instead of client-side fallbacks. Neovim currently depends on the server's actual `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/rename`, `textDocument/signatureHelp`, and file-rename notification support.
 - Dependency navigation must prefer `-sources.jar` content when it exists and fall back to decompiled class output only when no source jar is available.
+- Java completion should return stable LSP completion lists (never `null` items), support snippet-style insert text for methods, include Lombok-generated accessors for `@Data`-style classes, and publish unresolved-type diagnostics for demo-project errors such as `User1`.

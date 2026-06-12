@@ -247,7 +247,10 @@ public class DemoApplication {
 
 	response := server.handleCompletion(context.Background(), json.RawMessage(`2`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + sourcePath},
-		Position:     Position{Line: 7, Character: 12},
+		Position: Position{
+			Line:      7,
+			Character: lineColumnAtSubstring(readFile(t, sourcePath), 7, "log.") + len("log."),
+		},
 	}))
 	if response == nil || response.Error != nil {
 		t.Fatalf("handleCompletion() error = %#v", response)
@@ -265,6 +268,156 @@ public class DemoApplication {
 	}
 	if !found {
 		t.Fatalf("completion items = %#v, want info", list.Items)
+	}
+}
+
+func TestCompletionIncludesLombokDataAccessorsAndSnippets(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	moduleRoot := filepath.Join(root, "demo")
+	requestPath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "model", "CreateUserRequest.java")
+	controllerPath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "controller", "UserController.java")
+
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, requestPath, `package com.example.demo.model;
+
+import lombok.Data;
+
+@Data
+public class CreateUserRequest {
+    private String name;
+    private String email;
+}
+`)
+	writeFile(t, controllerPath, `package com.example.demo.controller;
+
+import com.example.demo.model.CreateUserRequest;
+
+public class UserController {
+    public void createUser(CreateUserRequest request) {
+        request.
+    }
+}
+`)
+
+	server.handleInitialize(json.RawMessage(`1`), mustRawJSON(t, initializeParams{
+		RootURI: "file://" + moduleRoot,
+	}))
+	openDocument(t, server, requestPath)
+	openDocument(t, server, controllerPath)
+
+	response := server.handleCompletion(context.Background(), json.RawMessage(`2`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
+		Position: Position{
+			Line:      6,
+			Character: lineColumnAtSubstring(readFile(t, controllerPath), 6, "request.") + len("request."),
+		},
+	}))
+	if response == nil || response.Error != nil {
+		t.Fatalf("handleCompletion() error = %#v", response)
+	}
+	list := response.Result.(*CompletionList)
+	labels := map[string]CompletionItem{}
+	for _, item := range list.Items {
+		labels[item.Label] = item
+	}
+	for _, name := range []string{"getName", "getEmail", "setName", "setEmail"} {
+		if _, ok := labels[name]; !ok {
+			t.Fatalf("completion labels = %#v, want %s", list.Items, name)
+		}
+	}
+	if got := labels["setEmail"].InsertText; got != "setEmail(${1:email})" {
+		t.Fatalf("setEmail insert text = %q", got)
+	}
+}
+
+func TestCompletionRanksMethodsByExpectedType(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	moduleRoot := filepath.Join(root, "demo")
+	servicePath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "service", "UserService.java")
+	controllerPath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "controller", "UserController.java")
+
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, servicePath, `package com.example.demo.service;
+
+import java.util.List;
+import com.example.demo.model.User;
+
+public interface UserService {
+    List<User> listUsers();
+    User getUser(Long id);
+    User createUser(User request);
+}
+`)
+	writeFile(t, controllerPath, `package com.example.demo.controller;
+
+import java.util.List;
+import com.example.demo.model.User;
+import com.example.demo.service.UserService;
+
+public class UserController {
+    private UserService userService;
+    public void run(User request) {
+        List<User> users = userService.
+    }
+}
+`)
+
+	server.handleInitialize(json.RawMessage(`1`), mustRawJSON(t, initializeParams{
+		RootURI: "file://" + moduleRoot,
+	}))
+	openDocument(t, server, servicePath)
+	openDocument(t, server, controllerPath)
+
+	response := server.handleCompletion(context.Background(), json.RawMessage(`2`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
+		Position: Position{
+			Line:      9,
+			Character: lineColumnAtSubstring(readFile(t, controllerPath), 9, "userService.") + len("userService."),
+		},
+	}))
+	if response == nil || response.Error != nil {
+		t.Fatalf("handleCompletion() error = %#v", response)
+	}
+	list := response.Result.(*CompletionList)
+	if len(list.Items) == 0 {
+		t.Fatal("completion list is empty")
+	}
+	if got := list.Items[0].Label; got != "listUsers" {
+		t.Fatalf("first completion = %q, want listUsers", got)
+	}
+}
+
+func TestDiagnosticsReportUnresolvedTypes(t *testing.T) {
+	server := newTestServer(t)
+	moduleRoot := t.TempDir()
+	sourcePath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "UserController.java")
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, sourcePath, `package com.example.demo;
+
+import java.util.List;
+
+public class UserController {
+    public void create() {
+        List<User1> users = List.of();
+    }
+}
+`)
+
+	diags := diagnosticsForDocument(context.Background(), server.navigation, moduleRoot, sourcePath, readFile(t, sourcePath))
+	if len(diags) == 0 {
+		t.Fatal("expected diagnostics, got none")
+	}
+	found := false
+	for _, diag := range diags {
+		if strings.Contains(diag.Message, "User1") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want unresolved User1", diags)
 	}
 }
 
@@ -425,4 +578,16 @@ func writeJarFromDirectory(t *testing.T, jarPath, sourceDir string) {
 	if err := writer.Close(); err != nil {
 		t.Fatalf("zip Close() error = %v", err)
 	}
+}
+
+func lineColumnAtSubstring(text string, lineIndex int, needle string) int {
+	lines := strings.Split(text, "\n")
+	if lineIndex < 0 || lineIndex >= len(lines) {
+		return 0
+	}
+	index := strings.Index(lines[lineIndex], needle)
+	if index < 0 {
+		return 0
+	}
+	return index
 }

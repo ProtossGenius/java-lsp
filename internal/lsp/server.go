@@ -27,6 +27,7 @@ type Server struct {
 	logger         *log.Logger
 	mu             sync.RWMutex
 	documents      map[string]openedDocument
+	notifications  []notificationMessage
 	workspaceRoots []string
 	shutdown       bool
 }
@@ -55,6 +56,12 @@ type responseError struct {
 	Message string `json:"message"`
 }
 
+type notificationMessage struct {
+	JSONRPC string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
+}
+
 func NewServer(analyzer *engine.Analyzer) *Server {
 	return &Server{
 		analyzer:   analyzer,
@@ -78,6 +85,11 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		shouldExit, response := s.handleMessage(ctx, message)
 		if response != nil {
 			if err := writeMessage(out, response); err != nil {
+				return err
+			}
+		}
+		for _, notification := range s.drainNotifications() {
+			if err := writeMessage(out, notification); err != nil {
 				return err
 			}
 		}
@@ -294,6 +306,7 @@ func (s *Server) handleDidOpen(ctx context.Context, raw json.RawMessage) *respon
 	if err := s.analyze(ctx, params.TextDocument.URI, params.TextDocument.LanguageID, params.TextDocument.Text); err != nil {
 		s.logger.Printf("analyze didOpen %s: %v", params.TextDocument.URI, err)
 	}
+	s.publishDiagnostics(ctx, params.TextDocument.URI, params.TextDocument.Text)
 	return nil
 }
 
@@ -318,6 +331,7 @@ func (s *Server) handleDidChange(ctx context.Context, raw json.RawMessage) *resp
 	if err := s.analyze(ctx, params.TextDocument.URI, document.language, latestText); err != nil {
 		s.logger.Printf("analyze didChange %s: %v", params.TextDocument.URI, err)
 	}
+	s.publishDiagnostics(ctx, params.TextDocument.URI, latestText)
 	return nil
 }
 
@@ -331,6 +345,10 @@ func (s *Server) handleDidClose(raw json.RawMessage) {
 	s.mu.Lock()
 	delete(s.documents, params.TextDocument.URI)
 	s.mu.Unlock()
+	s.enqueueNotification("textDocument/publishDiagnostics", publishDiagnosticsParams{
+		URI:         params.TextDocument.URI,
+		Diagnostics: []Diagnostic{},
+	})
 }
 
 func (s *Server) handleRename(id json.RawMessage, raw json.RawMessage) *responseMessage {
@@ -480,6 +498,37 @@ func internalErrorResponse(id json.RawMessage, err error) *responseMessage {
 	}
 }
 
+func (s *Server) publishDiagnostics(ctx context.Context, uri, text string) {
+	path, ok := filePathFromURI(uri)
+	if !ok {
+		return
+	}
+	root := s.workspaceRootForURI(uri)
+	diagnostics := diagnosticsForDocument(ctx, s.navigation, root, path, text)
+	s.enqueueNotification("textDocument/publishDiagnostics", publishDiagnosticsParams{
+		URI:         uri,
+		Diagnostics: diagnostics,
+	})
+}
+
+func (s *Server) enqueueNotification(method string, params any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifications = append(s.notifications, notificationMessage{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
+	})
+}
+
+func (s *Server) drainNotifications() []notificationMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	notifications := s.notifications
+	s.notifications = nil
+	return notifications
+}
+
 func readMessage(reader *bufio.Reader) (incomingMessage, error) {
 	contentLength := 0
 	for {
@@ -517,7 +566,7 @@ func readMessage(reader *bufio.Reader) (incomingMessage, error) {
 	return message, nil
 }
 
-func writeMessage(out io.Writer, message *responseMessage) error {
+func writeMessage(out io.Writer, message any) error {
 	payload, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("encode response: %w", err)
