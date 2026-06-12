@@ -171,6 +171,12 @@ func (s *Server) handleInitialize(id json.RawMessage, raw json.RawMessage) *resp
 	}
 
 	s.setWorkspaceRoots(params)
+	go func() {
+		for _, root := range s.workspaceRoots {
+			_, _ = s.navigation.workspaceImportMap(root)
+		}
+		_, _, _ = s.navigation.ensureJDKIndex()
+	}()
 
 	return &responseMessage{
 		JSONRPC: "2.0",

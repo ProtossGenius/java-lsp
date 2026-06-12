@@ -11,7 +11,7 @@ import (
 
 const insertTextFormatSnippet = 2
 
-var methodDeclRE = regexp.MustCompile(`^\s*(?:(?:public|protected|private|static|final|abstract|synchronized|native|default)\s+)*([A-Za-z_][A-Za-z0-9_<>\[\].?, ]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:\{|;)`)
+var methodDeclRE = regexp.MustCompile(`^\s*(?:(?:public|protected|private|static|final|abstract|synchronized|native|default)\s+)*(?:<[^>]+>\s+)?([A-Za-z_][A-Za-z0-9_<>\[\].?, ]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:\{|;)`)
 
 type CompletionList struct {
 	IsIncomplete bool             `json:"isIncomplete"`
@@ -29,11 +29,12 @@ type CompletionItem struct {
 }
 
 type completionContext struct {
-	source       sourceContext
-	text         string
-	locals       map[string]string
-	expectedType string
-	targetName   string
+	source         sourceContext
+	text           string
+	locals         map[string]string
+	expectedType   string
+	targetName     string
+	projectImports map[string]string
 }
 
 type completionTarget struct {
@@ -46,6 +47,7 @@ type completionMethod struct {
 	returnType string
 	params     []completionParam
 	generated  bool
+	isStatic   bool
 }
 
 type completionParam struct {
@@ -67,14 +69,15 @@ func completionAtPosition(ctx context.Context, resolver *navigationResolver, roo
 		expectedType: expectedType,
 		targetName:   targetName,
 	}
+	parsed.projectImports, _ = resolver.workspaceImportMap(root)
 
 	items := make([]CompletionItem, 0)
 	if memberCompletion {
-		receiverType, err := resolveCompletionReceiverType(parsed, target.receiver)
+		receiverType, receiverKind, err := resolveCompletionReceiverType(parsed, target.receiver)
 		if err != nil {
 			return &CompletionList{IsIncomplete: false, Items: []CompletionItem{}}, nil
 		}
-		members, err := completionItemsForType(ctx, resolver, parsed, root, req.path, receiverType, target.prefix)
+		members, err := completionItemsForType(ctx, resolver, parsed, root, req.path, receiverType, receiverKind, target.prefix)
 		if err != nil {
 			return nil, err
 		}
@@ -174,17 +177,26 @@ func completionTargetAtPosition(text string, pos Position) (completionTarget, bo
 	return completionTarget{prefix: prefix}, false, nil
 }
 
-func resolveCompletionReceiverType(ctx completionContext, receiver string) (string, error) {
+func resolveCompletionReceiverType(ctx completionContext, receiver string) (string, receiverResolutionKind, error) {
 	if typeName, ok := ctx.locals[receiver]; ok {
-		return resolveTypeName(ctx.source, typeName), nil
+		return resolveTypeName(ctx.source, typeName), receiverValue, nil
 	}
 	if typeName, ok := ctx.source.fields[receiver]; ok {
-		return resolveTypeName(ctx.source, typeName), nil
+		return resolveTypeName(ctx.source, typeName), receiverValue, nil
 	}
 	if receiver == "log" && hasLoggerAnnotation(ctx.source.classAnnotations) {
-		return "org.slf4j.Logger", nil
+		return "org.slf4j.Logger", receiverValue, nil
 	}
-	return "", errUnresolvedReceiver(receiver)
+	if fqcn, ok := ctx.source.imports[receiver]; ok {
+		return fqcn, receiverType, nil
+	}
+	if fqcn, ok := ctx.projectImports[receiver]; ok {
+		return fqcn, receiverType, nil
+	}
+	if isJavaLangType(receiver) {
+		return "java.lang." + receiver, receiverType, nil
+	}
+	return "", receiverValue, errUnresolvedReceiver(receiver)
 }
 
 func completionItemsForCurrentScope(ctx completionContext, prefix string) []CompletionItem {
@@ -218,15 +230,17 @@ func completionItemsForCurrentScope(ctx completionContext, prefix string) []Comp
 	return items
 }
 
-func completionItemsForType(ctx context.Context, resolver *navigationResolver, requestCtx completionContext, root, path, fqcn, prefix string) ([]CompletionItem, error) {
-	sourcePath, err := resolver.sourcePathForType(ctx, root, path, fqcn)
+func completionItemsForType(ctx context.Context, resolver *navigationResolver, requestCtx completionContext, root, path, fqcn string, receiverKind receiverResolutionKind, prefix string) ([]CompletionItem, error) {
+	info, err := resolver.typeInfoForType(ctx, root, path, fqcn)
 	if err != nil {
 		return nil, err
 	}
-	content := readFileString(sourcePath)
-	methods := parseMethodCompletions(content)
+	methods := info.methods
 	filtered := make([]CompletionItem, 0, len(methods))
 	for _, method := range methods {
+		if receiverKind == receiverType && !method.isStatic {
+			continue
+		}
 		if prefix != "" && !strings.HasPrefix(method.name, prefix) {
 			continue
 		}
@@ -292,6 +306,7 @@ func methodSignatureForCompletion(line string) (completionMethod, bool) {
 		name:       name,
 		returnType: returnType,
 		params:     parseCompletionParams(matches[3]),
+		isStatic:   strings.Contains(" "+line+" ", " static "),
 	}, true
 }
 

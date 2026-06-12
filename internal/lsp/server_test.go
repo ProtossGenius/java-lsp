@@ -389,6 +389,48 @@ public class UserController {
 	}
 }
 
+func TestCompletionSupportsImportedJDKTypeReceiver(t *testing.T) {
+	server := newTestServer(t)
+	moduleRoot := t.TempDir()
+	sourcePath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "DemoApplication.java")
+
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, sourcePath, `package com.example.demo;
+
+import java.util.List;
+
+public class DemoApplication {
+    void run() {
+        List.
+    }
+}
+`)
+
+	server.handleInitialize(json.RawMessage(`1`), mustRawJSON(t, initializeParams{
+		RootURI: "file://" + moduleRoot,
+	}))
+	openDocument(t, server, sourcePath)
+
+	response := server.handleCompletion(context.Background(), json.RawMessage(`2`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + sourcePath},
+		Position:     positionAtSubstring(readFile(t, sourcePath), "List.", len("List.")),
+	}))
+	if response == nil || response.Error != nil {
+		t.Fatalf("handleCompletion() error = %#v", response)
+	}
+	list := response.Result.(*CompletionList)
+	found := false
+	for _, item := range list.Items {
+		if item.Label == "of" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("completion items = %#v, want of", list.Items)
+	}
+}
+
 func TestDiagnosticsReportUnresolvedTypes(t *testing.T) {
 	server := newTestServer(t)
 	moduleRoot := t.TempDir()
@@ -418,6 +460,59 @@ public class UserController {
 	}
 	if !found {
 		t.Fatalf("diagnostics = %#v, want unresolved User1", diags)
+	}
+}
+
+func TestOpenedDependencySourceUsesOriginModuleClasspath(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	moduleRoot := filepath.Join(root, "demo")
+	repoDir := filepath.Join(root, "repo")
+	anchorPath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "Anchor.java")
+
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, anchorPath, `package com.example.demo;
+public class Anchor {}
+`)
+	writeZipFile(t, filepath.Join(repoDir, "dep-1.0.0.jar"), map[string]string{
+		"org/example/Dep.class":    "class bytes",
+		"org/example/UseDep.class": "class bytes",
+	})
+	writeZipFile(t, filepath.Join(repoDir, "dep-1.0.0-sources.jar"), map[string]string{
+		"org/example/Dep.java": `package org.example;
+public class Dep {}
+`,
+		"org/example/UseDep.java": `package org.example;
+
+import org.example.Dep;
+
+public class UseDep {
+    private Dep dep;
+}
+`,
+	})
+	writeMavenWrapper(t, moduleRoot, []string{filepath.Join(repoDir, "dep-1.0.0.jar")})
+
+	server.handleInitialize(json.RawMessage(`1`), mustRawJSON(t, initializeParams{
+		RootURI: "file://" + moduleRoot,
+	}))
+	useDepPath, err := server.navigation.materializeTypeSource(context.Background(), anchorPath, "org.example.UseDep")
+	if err != nil {
+		t.Fatalf("materializeTypeSource() error = %v", err)
+	}
+	useDepText := readFile(t, useDepPath)
+
+	locations, err := server.navigation.definition(context.Background(), "", navigationRequest{
+		uri:      fileURIFromPath(useDepPath),
+		text:     useDepText,
+		path:     useDepPath,
+		position: positionAtSubstring(useDepText, "Dep;", 1),
+	})
+	if err != nil {
+		t.Fatalf("definition() error = %v", err)
+	}
+	if len(locations) == 0 || !strings.HasSuffix(locations[0].URI, "/Dep.java") {
+		t.Fatalf("definition locations = %#v", locations)
 	}
 }
 
@@ -590,4 +685,17 @@ func lineColumnAtSubstring(text string, lineIndex int, needle string) int {
 		return 0
 	}
 	return index
+}
+
+func positionAtSubstring(text, needle string, offset int) Position {
+	lines := strings.Split(text, "\n")
+	for lineIndex, line := range lines {
+		if col := strings.Index(line, needle); col >= 0 {
+			return Position{
+				Line:      lineIndex,
+				Character: col + offset,
+			}
+		}
+	}
+	return Position{}
 }

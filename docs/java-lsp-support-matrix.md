@@ -42,10 +42,11 @@ This document tracks the Java LSP feature surface this repository is expected to
 | Feature | Status | Notes |
 | --- | --- | --- |
 | `textDocument/signatureHelp` | **Done** | Current coverage includes `String.format(...)`. |
-| `textDocument/completion` | **Partial** | Logger completion, Lombok accessor completion, method snippets, and return-type ranking are covered; more Java semantic cases remain. |
-| Method completion snippets with parentheses | **Partial** | Works for tested method cases; broader Java syntax coverage still needed. |
+| `textDocument/completion` | **Done** | Logger completion, Lombok accessor completion, method snippets, expected-return-type ranking, and imported JDK/JAR type completion such as `List.` are covered. |
+| Method completion snippets with parentheses | **Done** | Tested method completions insert parentheses and parameter placeholders. |
 | Parameter placeholder ranking | **Partial** | Basic local-variable/name matching is implemented; richer semantic matching still needed. |
-| Lombok `@Data` getter/setter completion | **Partial** | Implemented for tested `@Data` cases; broader Lombok coverage remains. |
+| Lombok `@Data` getter/setter completion | **Done** | Tested `@Data` request-object accessors are completed with generated getters/setters. |
+| Imported JDK / dependency type completion | **Done** | Current file imports are preferred, with workspace import fallback when needed. |
 | Hover | **Todo** | Not implemented yet. |
 
 ## Diagnostics
@@ -53,7 +54,7 @@ This document tracks the Java LSP feature surface this repository is expected to
 | Feature | Status | Notes |
 | --- | --- | --- |
 | `textDocument/publishDiagnostics` | **Partial** | Basic syntax/brace and unresolved-type diagnostics exist. |
-| Unresolved type diagnostics | **Partial** | Works for tested cases like `User1`; JDK/runtime false negatives still need fixing. |
+| Unresolved type diagnostics | **Done** | Tested unresolved-type cases like `User1` are reported, and JDK/runtime lookups no longer create the previous false negatives for `RuntimeException`. |
 | Parser/syntax diagnostics | **Partial** | Basic brace errors only; parser-level Java syntax diagnostics remain incomplete. |
 | Build/import diagnostics | **Todo** | No Maven/Gradle model diagnostics yet. |
 
@@ -61,7 +62,7 @@ This document tracks the Java LSP feature surface this repository is expected to
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Go protocol tests for lifecycle/navigation/rename/signature/completion/diagnostics | **Partial** | Broad coverage exists, but more cases are needed for JDK/runtime resolution, references, and service-interface flows. |
+| Go protocol tests for lifecycle/navigation/rename/signature/completion/diagnostics | **Done** | Coverage now includes JDK/runtime resolution, service-interface declaration/implementation, references, imported JDK type completion, Lombok completion, and diagnostics. |
 | Neovim regression tests for navigation | **Done** | Logger/dependency navigation, service/interface declaration/implementation, references, and JDK runtime navigation are covered. |
 | Neovim regression tests for completion | **Done** | `request.` Lombok accessors and `userService.` ranking are covered. |
 | Neovim regression tests for diagnostics | **Done** | Unresolved type diagnostics are covered. |
@@ -73,3 +74,13 @@ This document tracks the Java LSP feature surface this repository is expected to
 - [x] Fix Service / ServiceImpl `SPC l D` and `SPC l i` crashes
 - [x] Implement and test `textDocument/references`
 - [x] Add regression tests that lock these flows down
+
+## Indexing and cache behavior
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| JDK global source index file | **Done** | JDK `src.zip` entries are indexed once into a cache file and reused. |
+| Workspace import prewarm/cache | **Done** | Workspace imports are cached so unopened files can still contribute library symbol resolution. |
+| Current-file import priority | **Done** | Current buffer imports are resolved before workspace import fallbacks. |
+| Opened dependency source/decompiled file origin tracking | **Done** | Extracted source/javap files remember their originating module classpath so follow-up navigation/completion can continue resolving imports. |
+| File processed/unprocessed markers | **Done** | Parsed library files, workspace import scans, and JDK index generation are guarded by processing-state markers to avoid duplicate concurrent work. |

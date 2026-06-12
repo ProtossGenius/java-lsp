@@ -17,9 +17,13 @@ import (
 )
 
 type navigationResolver struct {
-	mu        sync.Mutex
-	cacheDir  string
-	classpath map[string]*moduleClasspath
+	mu              sync.Mutex
+	cacheDir        string
+	classpath       map[string]*moduleClasspath
+	sourceOrigins   map[string]*moduleClasspath
+	parsedTypes     map[string]*parsedTypeState
+	workspaceImport map[string]*workspaceImportState
+	jdkIndex        *jdkIndexState
 }
 
 func workspaceReferences(root, symbol string, includeDeclaration bool) []Location {
@@ -159,27 +163,20 @@ func (r *navigationResolver) jdkSourcePathForType(fqcn string) (string, bool, er
 		return "", false, nil
 	}
 
-	srcZip := detectJDKSrcZip()
-	if srcZip != "" {
-		modulePath := modulePathForJDKType(fqcn)
-		if modulePath != "" {
-			found, err := zipContains(srcZip, modulePath)
+	srcZip, entries, err := r.ensureJDKIndex()
+	if err == nil && srcZip != "" {
+		if entry, ok := entries[fqcn]; ok {
+			sourcePath, err := r.extractSourceFile(srcZip, entry, nil)
 			if err != nil {
 				return "", false, err
 			}
-			if found {
-				sourcePath, err := r.extractSourceFile(srcZip, modulePath)
-				if err != nil {
-					return "", false, err
-				}
-				return sourcePath, true, nil
-			}
+			return sourcePath, true, nil
 		}
 	}
 
 	jmod := detectJavaBaseJmod()
 	if jmod != "" {
-		outputPath, err := r.decompileClass(jmod, fqcn)
+		outputPath, err := r.decompileClass(jmod, fqcn, nil)
 		if err != nil {
 			return "", false, err
 		}
@@ -267,34 +264,49 @@ type implementationCandidate struct {
 	score    int
 }
 
+type receiverResolutionKind int
+
+const (
+	receiverValue receiverResolutionKind = iota
+	receiverType
+)
+
 var fieldDeclRE = regexp.MustCompile(`^\s*(?:public|protected|private|static|final|transient|volatile|\s)+([A-Za-z_][A-Za-z0-9_<>\[\].?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^;]*)?;`)
 
 func newNavigationResolver() *navigationResolver {
 	cacheDir := filepath.Join(os.TempDir(), "java-lsp-navigation")
 	return &navigationResolver{
-		cacheDir:  cacheDir,
-		classpath: make(map[string]*moduleClasspath),
+		cacheDir:        cacheDir,
+		classpath:       make(map[string]*moduleClasspath),
+		sourceOrigins:   make(map[string]*moduleClasspath),
+		parsedTypes:     make(map[string]*parsedTypeState),
+		workspaceImport: make(map[string]*workspaceImportState),
+		jdkIndex: &jdkIndexState{
+			wait: make(chan struct{}),
+		},
 	}
 }
 
 func (r *navigationResolver) definition(ctx context.Context, root string, req navigationRequest) ([]Location, error) {
 	contextInfo := parseSourceContext(req.text)
 
-	if member, ok, err := memberAccessAtPosition(req.text, req.position); err != nil {
-		return nil, err
-	} else if ok {
-		receiverType, err := resolveReceiverType(req.text, contextInfo, member.receiver)
-		if err != nil {
+	if !isImportOrPackagePosition(req.text, req.position) {
+		if member, ok, err := memberAccessAtPosition(req.text, req.position); err != nil {
 			return nil, err
-		}
-		if member.focus == "receiver" {
-			location, err := r.locationForTypeDeclaration(ctx, root, req.path, receiverType)
+		} else if ok {
+			receiverType, err := resolveReceiverType(req.text, contextInfo, member.receiver)
 			if err != nil {
 				return nil, err
 			}
-			return []Location{location}, nil
+			if member.focus == "receiver" {
+				location, err := r.locationForTypeDeclaration(ctx, root, req.path, receiverType)
+				if err != nil {
+					return nil, err
+				}
+				return []Location{location}, nil
+			}
+			return r.locationsForTypeMember(ctx, root, req.path, receiverType, member.member)
 		}
-		return r.locationsForTypeMember(ctx, root, req.path, receiverType, member.member)
 	}
 
 	identifier, err := wordAtPosition(req.text, req.position)
@@ -320,10 +332,12 @@ func (r *navigationResolver) definition(ctx context.Context, root string, req na
 }
 
 func (r *navigationResolver) references(ctx context.Context, root string, req navigationRequest, includeDeclaration bool) ([]Location, error) {
-	if member, ok, err := memberAccessAtPosition(req.text, req.position); err != nil {
-		return nil, err
-	} else if ok {
-		return workspaceReferences(root, member.member, includeDeclaration), nil
+	if !isImportOrPackagePosition(req.text, req.position) {
+		if member, ok, err := memberAccessAtPosition(req.text, req.position); err != nil {
+			return nil, err
+		} else if ok {
+			return workspaceReferences(root, member.member, includeDeclaration), nil
+		}
 	}
 
 	if method, ok := methodSymbolAtPosition(req.text, req.position); ok {
@@ -335,6 +349,15 @@ func (r *navigationResolver) references(ctx context.Context, root string, req na
 		return nil, err
 	}
 	return workspaceReferences(root, identifier, includeDeclaration), nil
+}
+
+func isImportOrPackagePosition(text string, pos Position) bool {
+	lines := strings.Split(text, "\n")
+	if pos.Line < 0 || pos.Line >= len(lines) {
+		return false
+	}
+	trimmed := strings.TrimSpace(lines[pos.Line])
+	return strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "package ")
 }
 
 func (r *navigationResolver) declaration(ctx context.Context, root string, req navigationRequest) ([]Location, error) {
@@ -480,7 +503,7 @@ func (r *navigationResolver) implementationsForTypeMember(ctx context.Context, m
 			if !implementsTarget {
 				continue
 			}
-			sourcePath, err := r.extractSourceFile(jar.sourceJarPath, file.Name)
+			sourcePath, err := r.extractSourceFile(jar.sourceJarPath, file.Name, module)
 			if err != nil {
 				reader.Close()
 				return nil, err
@@ -686,7 +709,7 @@ func (r *navigationResolver) materializeTypeSource(ctx context.Context, path, fq
 			return "", err
 		}
 		if found {
-			return r.extractSourceFile(jar.sourceJarPath, relativeSourcePath)
+			return r.extractSourceFile(jar.sourceJarPath, relativeSourcePath, module)
 		}
 	}
 
@@ -697,7 +720,7 @@ func (r *navigationResolver) materializeTypeSource(ctx context.Context, path, fq
 			return "", err
 		}
 		if found {
-			return r.decompileClass(jar.jarPath, fqcn)
+			return r.decompileClass(jar.jarPath, fqcn, module)
 		}
 	}
 
@@ -718,6 +741,9 @@ func (r *navigationResolver) sourcePathForType(ctx context.Context, root, path, 
 }
 
 func (r *navigationResolver) moduleForPath(ctx context.Context, path string) (*moduleClasspath, error) {
+	if module := r.originModuleForPath(path); module != nil {
+		return module, nil
+	}
 	moduleRoot, reactorRoot := findMavenRoots(path)
 	if moduleRoot == "" {
 		return nil, errors.New("could not find Maven module root for file")
@@ -869,7 +895,7 @@ func zipContains(jarPath, entryName string) (bool, error) {
 	return false, nil
 }
 
-func (r *navigationResolver) extractSourceFile(sourceJarPath, entryName string) (string, error) {
+func (r *navigationResolver) extractSourceFile(sourceJarPath, entryName string, module *moduleClasspath) (string, error) {
 	reader, err := zip.OpenReader(sourceJarPath)
 	if err != nil {
 		return "", err
@@ -891,15 +917,17 @@ func (r *navigationResolver) extractSourceFile(sourceJarPath, entryName string) 
 		if err := os.WriteFile(outputPath, []byte(content), 0o644); err != nil {
 			return "", err
 		}
+		r.registerSourceOrigin(outputPath, module)
 		return outputPath, nil
 	}
 
 	return "", fmt.Errorf("source entry %s not found in %s", entryName, sourceJarPath)
 }
 
-func (r *navigationResolver) decompileClass(jarPath, fqcn string) (string, error) {
+func (r *navigationResolver) decompileClass(jarPath, fqcn string, module *moduleClasspath) (string, error) {
 	outputPath := filepath.Join(r.cacheDir, "javap", filepath.Base(jarPath), strings.ReplaceAll(fqcn, ".", "_")+".java")
 	if data, err := os.ReadFile(outputPath); err == nil && len(data) > 0 {
+		r.registerSourceOrigin(outputPath, module)
 		return outputPath, nil
 	}
 
@@ -914,6 +942,7 @@ func (r *navigationResolver) decompileClass(jarPath, fqcn string) (string, error
 	if err := os.WriteFile(outputPath, output, 0o644); err != nil {
 		return "", err
 	}
+	r.registerSourceOrigin(outputPath, module)
 	return outputPath, nil
 }
 
