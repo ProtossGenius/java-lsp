@@ -178,25 +178,7 @@ func completionTargetAtPosition(text string, pos Position) (completionTarget, bo
 }
 
 func resolveCompletionReceiverType(ctx completionContext, receiver string) (string, receiverResolutionKind, error) {
-	if typeName, ok := ctx.locals[receiver]; ok {
-		return resolveTypeName(ctx.source, typeName), receiverValue, nil
-	}
-	if typeName, ok := ctx.source.fields[receiver]; ok {
-		return resolveTypeName(ctx.source, typeName), receiverValue, nil
-	}
-	if receiver == "log" && hasLoggerAnnotation(ctx.source.classAnnotations) {
-		return "org.slf4j.Logger", receiverValue, nil
-	}
-	if fqcn, ok := ctx.source.imports[receiver]; ok {
-		return fqcn, receiverType, nil
-	}
-	if fqcn, ok := ctx.projectImports[receiver]; ok {
-		return fqcn, receiverType, nil
-	}
-	if isJavaLangType(receiver) {
-		return "java.lang." + receiver, receiverType, nil
-	}
-	return "", receiverValue, errUnresolvedReceiver(receiver)
+	return resolveReceiverTypeWithWorkspace(ctx.source, ctx.locals, ctx.projectImports, receiver)
 }
 
 func completionItemsForCurrentScope(ctx completionContext, prefix string) []CompletionItem {

@@ -106,6 +106,16 @@ type signatureHelpParams struct {
 	Position     Position               `json:"position"`
 }
 
+type MarkupContent struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+type Hover struct {
+	Contents MarkupContent `json:"contents"`
+	Range    *Range        `json:"range,omitempty"`
+}
+
 type SignatureHelp struct {
 	Signatures      []SignatureInformation `json:"signatures"`
 	ActiveSignature int                    `json:"activeSignature"`

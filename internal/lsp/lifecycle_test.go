@@ -43,6 +43,24 @@ func TestWorkspaceLifecycleAndNavigationCoverage(t *testing.T) {
 	}))
 	requireLocations(t, "implementation", implementation, filepath.Base(implPath), "DefaultGreeter.java")
 
+	typeDefinition := server.handleTypeDefinition(context.Background(), json.RawMessage(`4d`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
+		Position:     Position{Line: 10, Character: 24},
+	}))
+	requireLocations(t, "type definition", typeDefinition, "String.java", "String.java")
+
+	hover := server.handleHover(context.Background(), json.RawMessage(`4e`), mustRawJSON(t, textDocumentPositionParams{
+		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
+		Position:     Position{Line: 10, Character: 24},
+	}))
+	if hover == nil || hover.Error != nil {
+		t.Fatalf("hover error = %#v", hover)
+	}
+	hoverResult, ok := hover.Result.(*Hover)
+	if !ok || !strings.Contains(hoverResult.Contents.Value, "String greet(String name)") {
+		t.Fatalf("hover result = %#v", hover.Result)
+	}
+
 	interfaceImpl := server.handleImplementation(context.Background(), json.RawMessage(`4a`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + greeterPath},
 		Position:     Position{Line: 4, Character: 12},
@@ -226,6 +244,37 @@ public class DemoApplication {
 	}
 	if got := locations[0].URI; !strings.HasSuffix(got, "/RuntimeException.java") {
 		t.Fatalf("jdk definition uri = %q, want RuntimeException.java", got)
+	}
+}
+
+func TestDiagnosticsReportMissingImportSemicolon(t *testing.T) {
+	server := newTestServer(t)
+	moduleRoot := t.TempDir()
+	sourcePath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "BrokenImports.java")
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, sourcePath, `package com.example.demo
+
+import java.util.List
+
+public class BrokenImports {}
+`)
+
+	diags := diagnosticsForDocument(context.Background(), server.navigation, moduleRoot, sourcePath, readFile(t, sourcePath))
+	if len(diags) < 2 {
+		t.Fatalf("diagnostics = %#v, want package/import semicolon diagnostics", diags)
+	}
+	foundPackage := false
+	foundImport := false
+	for _, diag := range diags {
+		if strings.Contains(diag.Message, "package declaration is missing a semicolon") {
+			foundPackage = true
+		}
+		if strings.Contains(diag.Message, "import statement is missing a semicolon") {
+			foundImport = true
+		}
+	}
+	if !foundPackage || !foundImport {
+		t.Fatalf("diagnostics = %#v, want package and import semicolon diagnostics", diags)
 	}
 }
 

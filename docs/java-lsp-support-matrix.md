@@ -24,7 +24,7 @@ This document tracks the Java LSP feature surface this repository is expected to
 | `textDocument/definition` | **Done** | Covers workspace types, dependency/JAR types, and JDK runtime types such as `RuntimeException`. |
 | `textDocument/declaration` | **Done** | Covers receiver/member navigation and method-level declaration jumps between interfaces and implementations. |
 | `textDocument/implementation` | **Done** | Covers receiver/member navigation plus method-level jumps from interfaces to implementations and stable behavior on implementation methods themselves. |
-| `textDocument/typeDefinition` | **Todo** | Not implemented yet. |
+| `textDocument/typeDefinition` | **Done** | Variables, fields, and method-call results resolve to their type declarations, including JDK/library types such as `List`. |
 | `textDocument/references` | **Done** | Workspace references for identifiers and method names are implemented and covered by regression tests. |
 | JAR navigation with source jar preference | **Done** | Source jar is preferred when available. |
 | JAR navigation fallback to decompiled content | **Done** | Falls back to decompiled/javap output when no sources exist. |
@@ -47,23 +47,23 @@ This document tracks the Java LSP feature surface this repository is expected to
 | Parameter placeholder ranking | **Partial** | Basic local-variable/name matching is implemented; richer semantic matching still needed. |
 | Lombok `@Data` getter/setter completion | **Done** | Tested `@Data` request-object accessors are completed with generated getters/setters. |
 | Imported JDK / dependency type completion | **Done** | Current file imports are preferred, with workspace import fallback when needed. |
-| Hover | **Todo** | Not implemented yet. |
+| Hover | **Done** | Type/value/method hover is implemented for current-project and dependency-backed Java symbols. |
 
 ## Diagnostics
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| `textDocument/publishDiagnostics` | **Partial** | Basic syntax/brace and unresolved-type diagnostics exist. |
+| `textDocument/publishDiagnostics` | **Partial** | Basic syntax/brace, missing-semicolon, unresolved-import, and unresolved-type diagnostics exist. |
 | Unresolved type diagnostics | **Done** | Tested unresolved-type cases like `User1` are reported, and JDK/runtime lookups no longer create the previous false negatives for `RuntimeException`. |
-| Parser/syntax diagnostics | **Partial** | Basic brace errors only; parser-level Java syntax diagnostics remain incomplete. |
-| Build/import diagnostics | **Todo** | No Maven/Gradle model diagnostics yet. |
+| Parser/syntax diagnostics | **Partial** | Brace and missing-semicolon diagnostics exist; richer Java parser diagnostics remain incomplete. |
+| Build/import diagnostics | **Partial** | Import-resolution diagnostics exist, but full Maven/Gradle model diagnostics are still missing. |
 
 ## Test coverage
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Go protocol tests for lifecycle/navigation/rename/signature/completion/diagnostics | **Done** | Coverage now includes JDK/runtime resolution, service-interface declaration/implementation, references, imported JDK type completion, Lombok completion, and diagnostics. |
-| Neovim regression tests for navigation | **Done** | Logger/dependency navigation, service/interface declaration/implementation, references, and JDK runtime navigation are covered. |
+| Go protocol tests for lifecycle/navigation/rename/signature/completion/diagnostics | **Done** | Coverage now includes JDK/runtime resolution, service-interface declaration/implementation, references, imported JDK type completion, hover, type definition, Lombok completion, and diagnostics. |
+| Neovim regression tests for navigation | **Done** | Logger/dependency navigation, service/interface declaration/implementation, references, JDK runtime navigation, hover, and type definition are covered. |
 | Neovim regression tests for completion | **Done** | `request.` Lombok accessors and `userService.` ranking are covered. |
 | Neovim regression tests for diagnostics | **Done** | Unresolved type diagnostics are covered. |
 
@@ -74,6 +74,16 @@ This document tracks the Java LSP feature surface this repository is expected to
 - [x] Fix Service / ServiceImpl `SPC l D` and `SPC l i` crashes
 - [x] Implement and test `textDocument/references`
 - [x] Add regression tests that lock these flows down
+- [x] Implement and test `textDocument/typeDefinition`
+- [x] Implement and test `textDocument/hover`
+- [x] Improve locally-detectable import/syntax diagnostics
+
+## Next unfinished areas
+
+- [ ] Improve parameter placeholder ranking beyond simple local-variable/name matching
+- [ ] Add richer parser-level syntax diagnostics beyond braces/missing semicolons/unresolved types
+- [ ] Add deeper Maven/Gradle model diagnostics (dependency/import/build state)
+- [ ] Implement `textDocument/hover` detail enrichment (documentation/comments, not just signatures)
 
 ## Indexing and cache behavior
 

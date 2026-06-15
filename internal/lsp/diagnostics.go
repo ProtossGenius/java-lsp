@@ -13,6 +13,7 @@ var newTypeRE = regexp.MustCompile(`\bnew\s+([A-Za-z_][A-Za-z0-9_<>\[\].?]*)\s*\
 func diagnosticsForDocument(ctx context.Context, resolver *navigationResolver, root, path, text string) []Diagnostic {
 	diagnostics := make([]Diagnostic, 0)
 	diagnostics = append(diagnostics, braceDiagnostics(text)...)
+	diagnostics = append(diagnostics, statementTerminatorDiagnostics(text)...)
 	diagnostics = append(diagnostics, unresolvedTypeDiagnostics(ctx, resolver, root, path, text)...)
 	return diagnostics
 }
@@ -55,6 +56,37 @@ func braceDiagnostics(text string) []Diagnostic {
 		}}
 	}
 	return nil
+}
+
+func statementTerminatorDiagnostics(text string) []Diagnostic {
+	lines := strings.Split(text, "\n")
+	diagnostics := make([]Diagnostic, 0)
+	for lineIndex, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "package ") && !strings.HasSuffix(trimmed, ";"):
+			diagnostics = append(diagnostics, Diagnostic{
+				Range: Range{
+					Start: Position{Line: lineIndex, Character: 0},
+					End:   Position{Line: lineIndex, Character: len([]rune(line))},
+				},
+				Severity: 1,
+				Source:   "java-lsp",
+				Message:  "package declaration is missing a semicolon",
+			})
+		case strings.HasPrefix(trimmed, "import ") && !strings.HasSuffix(trimmed, ";"):
+			diagnostics = append(diagnostics, Diagnostic{
+				Range: Range{
+					Start: Position{Line: lineIndex, Character: 0},
+					End:   Position{Line: lineIndex, Character: len([]rune(line))},
+				},
+				Severity: 1,
+				Source:   "java-lsp",
+				Message:  "import statement is missing a semicolon",
+			})
+		}
+	}
+	return diagnostics
 }
 
 func unresolvedTypeDiagnostics(ctx context.Context, resolver *navigationResolver, root, path, text string) []Diagnostic {

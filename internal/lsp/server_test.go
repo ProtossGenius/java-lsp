@@ -33,7 +33,7 @@ func TestInitializeAdvertisesRenameAndSignatureHelp(t *testing.T) {
 		t.Fatalf("handleInitialize() result type = %T", response.Result)
 	}
 	capabilities := result["capabilities"].(map[string]any)
-	for _, key := range []string{"definitionProvider", "declarationProvider", "implementationProvider", "renameProvider"} {
+	for _, key := range []string{"definitionProvider", "declarationProvider", "implementationProvider", "typeDefinitionProvider", "hoverProvider", "renameProvider"} {
 		if capabilities[key] != true {
 			t.Fatalf("%s = %#v, want true", key, capabilities[key])
 		}
