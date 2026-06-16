@@ -21,6 +21,8 @@ const (
 
 type parsedTypeInfo struct {
 	sourcePath string
+	typeHeader string
+	typeDoc    string
 	source     sourceContext
 	methods    []completionMethod
 }
@@ -36,6 +38,13 @@ type workspaceImportState struct {
 	status processingStatus
 	wait   chan struct{}
 	value  map[string]string
+	err    error
+}
+
+type moduleClasspathState struct {
+	status processingStatus
+	wait   chan struct{}
+	value  *moduleClasspath
 	err    error
 }
 
@@ -104,8 +113,11 @@ func (r *navigationResolver) typeInfoForType(ctx context.Context, root, path, fq
 
 func parseTypeInfoFromSource(sourcePath string) (*parsedTypeInfo, error) {
 	content := readFileString(sourcePath)
+	header, doc := extractTypeHeaderAndDoc(content)
 	return &parsedTypeInfo{
 		sourcePath: sourcePath,
+		typeHeader: header,
+		typeDoc:    doc,
 		source:     parseSourceContext(content),
 		methods:    parseMethodCompletions(content),
 	}, nil

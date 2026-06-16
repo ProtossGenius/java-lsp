@@ -24,58 +24,61 @@ func TestWorkspaceLifecycleAndNavigationCoverage(t *testing.T) {
 	openDocument(t, server, controllerPath)
 	openDocument(t, server, greeterPath)
 	openDocument(t, server, implPath)
+	controllerText := readFile(t, controllerPath)
+	greeterText := readFile(t, greeterPath)
+	implText := readFile(t, implPath)
 
 	definition := server.handleDefinition(context.Background(), json.RawMessage(`2`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
-		Position:     Position{Line: 7, Character: 12},
+		Position:     positionAtSubstring(controllerText, "greeter.greet", len("greeter.")),
 	}))
 	requireLocations(t, "definition", definition, filepath.Base(greeterPath), "Greeter.java")
 
 	declaration := server.handleDeclaration(context.Background(), json.RawMessage(`3`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
-		Position:     Position{Line: 7, Character: 12},
+		Position:     positionAtSubstring(controllerText, "greeter.greet", len("greeter.")),
 	}))
 	requireLocations(t, "declaration", declaration, filepath.Base(greeterPath), "Greeter.java")
 
 	implementation := server.handleImplementation(context.Background(), json.RawMessage(`4`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
-		Position:     Position{Line: 10, Character: 24},
+		Position:     positionAtSubstring(controllerText, "greeter.greet", len("greeter.")),
 	}))
 	requireLocations(t, "implementation", implementation, filepath.Base(implPath), "DefaultGreeter.java")
 
 	typeDefinition := server.handleTypeDefinition(context.Background(), json.RawMessage(`4d`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
-		Position:     Position{Line: 10, Character: 24},
+		Position:     positionAtSubstring(controllerText, "greeter.greet", len("greeter.")),
 	}))
 	requireLocations(t, "type definition", typeDefinition, "String.java", "String.java")
 
 	hover := server.handleHover(context.Background(), json.RawMessage(`4e`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + controllerPath},
-		Position:     Position{Line: 10, Character: 24},
+		Position:     positionAtSubstring(controllerText, "greeter.greet", len("greeter.")),
 	}))
 	if hover == nil || hover.Error != nil {
 		t.Fatalf("hover error = %#v", hover)
 	}
 	hoverResult, ok := hover.Result.(*Hover)
-	if !ok || !strings.Contains(hoverResult.Contents.Value, "String greet(String name)") {
+	if !ok || !strings.Contains(hoverResult.Contents.Value, "String greet(String name)") || !strings.Contains(hoverResult.Contents.Value, "Returns a greeting message") {
 		t.Fatalf("hover result = %#v", hover.Result)
 	}
 
 	interfaceImpl := server.handleImplementation(context.Background(), json.RawMessage(`4a`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + greeterPath},
-		Position:     Position{Line: 4, Character: 12},
+		Position:     positionAtSubstring(greeterText, "String greet(", len("String ")),
 	}))
 	requireLocations(t, "interface implementation", interfaceImpl, filepath.Base(implPath), "DefaultGreeter.java")
 
 	implDecl := server.handleDeclaration(context.Background(), json.RawMessage(`4b`), mustRawJSON(t, textDocumentPositionParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + implPath},
-		Position:     Position{Line: 7, Character: 18},
+		Position:     positionAtSubstring(implText, "public String greet(", len("public String ")),
 	}))
 	requireLocations(t, "implementation declaration", implDecl, filepath.Base(greeterPath), "Greeter.java")
 
 	refs := server.handleReferences(context.Background(), json.RawMessage(`4c`), mustRawJSON(t, referenceParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + greeterPath},
-		Position:     Position{Line: 4, Character: 12},
+		Position:     positionAtSubstring(greeterText, "String greet(", len("String ")),
 		Context: struct {
 			IncludeDeclaration bool `json:"includeDeclaration"`
 		}{
@@ -107,7 +110,7 @@ func TestWorkspaceLifecycleAndNavigationCoverage(t *testing.T) {
 
 	rename := server.handleRename(json.RawMessage(`6`), mustRawJSON(t, renameParams{
 		TextDocument: textDocumentIdentifier{URI: "file://" + greeterPath},
-		Position:     Position{Line: 2, Character: 17},
+		Position:     positionAtSubstring(greeterText, "public interface Greeter", len("public interface ")),
 		NewName:      "WelcomeGreeter",
 	}))
 	if rename == nil || rename.Error != nil {
@@ -275,6 +278,36 @@ public class BrokenImports {}
 	}
 	if !foundPackage || !foundImport {
 		t.Fatalf("diagnostics = %#v, want package and import semicolon diagnostics", diags)
+	}
+}
+
+func TestDiagnosticsReportClasspathResolutionFailure(t *testing.T) {
+	server := newTestServer(t)
+	moduleRoot := t.TempDir()
+	sourcePath := filepath.Join(moduleRoot, "src", "main", "java", "com", "example", "demo", "BrokenClasspath.java")
+
+	writeFile(t, filepath.Join(moduleRoot, "pom.xml"), `<project/>`)
+	writeFile(t, filepath.Join(moduleRoot, "mvnw"), "#!/bin/sh\nexit 1\n")
+	if err := os.Chmod(filepath.Join(moduleRoot, "mvnw"), 0o755); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	writeFile(t, sourcePath, `package com.example.demo;
+
+import com.example.missing.Dependency;
+
+public class BrokenClasspath {}
+`)
+
+	diags := diagnosticsForDocument(context.Background(), server.navigation, moduleRoot, sourcePath, readFile(t, sourcePath))
+	found := false
+	for _, diag := range diags {
+		if strings.Contains(diag.Message, "classpath resolution failed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %#v, want classpath resolution failure", diags)
 	}
 }
 

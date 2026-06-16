@@ -145,13 +145,16 @@ func (r *navigationResolver) hoverForType(ctx context.Context, root, path, fqcn 
 	if err != nil {
 		return nil, err
 	}
-	header := firstTypeHeader(readFileString(info.sourcePath))
+	header := info.typeHeader
 	if header == "" {
 		header = simpleName(fqcn)
 	}
 	value := fmt.Sprintf("```java\npackage %s;\n%s\n```", info.source.packageName, header)
 	if info.source.packageName == "" {
 		value = fmt.Sprintf("```java\n%s\n```", header)
+	}
+	if info.typeDoc != "" {
+		value = info.typeDoc + "\n\n" + value
 	}
 	return &Hover{
 		Contents: MarkupContent{
@@ -170,10 +173,14 @@ func hoverForMethod(method completionMethod) *Hover {
 	if method.generated {
 		signature += " // generated"
 	}
+	value := "```java\n" + signature + "\n```"
+	if method.documentation != "" {
+		value = method.documentation + "\n\n" + value
+	}
 	return &Hover{
 		Contents: MarkupContent{
 			Kind:  "markdown",
-			Value: "```java\n" + signature + "\n```",
+			Value: value,
 		},
 	}
 }

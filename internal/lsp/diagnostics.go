@@ -14,6 +14,7 @@ func diagnosticsForDocument(ctx context.Context, resolver *navigationResolver, r
 	diagnostics := make([]Diagnostic, 0)
 	diagnostics = append(diagnostics, braceDiagnostics(text)...)
 	diagnostics = append(diagnostics, statementTerminatorDiagnostics(text)...)
+	diagnostics = append(diagnostics, buildImportDiagnostics(ctx, resolver, path, text)...)
 	diagnostics = append(diagnostics, unresolvedTypeDiagnostics(ctx, resolver, root, path, text)...)
 	return diagnostics
 }
@@ -153,6 +154,36 @@ func unresolvedTypeDiagnostics(ctx context.Context, resolver *navigationResolver
 	}
 
 	return diags
+}
+
+func buildImportDiagnostics(ctx context.Context, resolver *navigationResolver, path, text string) []Diagnostic {
+	err := resolver.moduleClasspathError(ctx, path)
+	if err == nil {
+		return nil
+	}
+
+	lines := strings.Split(text, "\n")
+	lineIndex := 0
+	character := 0
+	for index, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "import ") {
+			lineIndex = index
+			break
+		}
+	}
+	if lineIndex == 0 && len(lines) > 0 {
+		character = len([]rune(lines[0]))
+	}
+
+	return []Diagnostic{{
+		Range: Range{
+			Start: Position{Line: lineIndex, Character: character},
+			End:   Position{Line: lineIndex, Character: character},
+		},
+		Severity: 2,
+		Source:   "java-lsp",
+		Message:  "classpath resolution failed: " + err.Error(),
+	}}
 }
 
 func extractTypeNames(typeName string) []string {

@@ -19,7 +19,7 @@ import (
 type navigationResolver struct {
 	mu              sync.Mutex
 	cacheDir        string
-	classpath       map[string]*moduleClasspath
+	moduleStates    map[string]*moduleClasspathState
 	sourceOrigins   map[string]*moduleClasspath
 	parsedTypes     map[string]*parsedTypeState
 	workspaceImport map[string]*workspaceImportState
@@ -277,7 +277,7 @@ func newNavigationResolver() *navigationResolver {
 	cacheDir := filepath.Join(os.TempDir(), "java-lsp-navigation")
 	return &navigationResolver{
 		cacheDir:        cacheDir,
-		classpath:       make(map[string]*moduleClasspath),
+		moduleStates:    make(map[string]*moduleClasspathState),
 		sourceOrigins:   make(map[string]*moduleClasspath),
 		parsedTypes:     make(map[string]*parsedTypeState),
 		workspaceImport: make(map[string]*workspaceImportState),
@@ -752,24 +752,66 @@ func (r *navigationResolver) moduleForPath(ctx context.Context, path string) (*m
 		reactorRoot = moduleRoot
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	for {
+		r.mu.Lock()
+		if state, ok := r.moduleStates[moduleRoot]; ok {
+			switch state.status {
+			case statusDone:
+				value := state.value
+				err := state.err
+				r.mu.Unlock()
+				return value, err
+			case statusFailed:
+				err := state.err
+				r.mu.Unlock()
+				return nil, err
+			case statusProcessing:
+				wait := state.wait
+				r.mu.Unlock()
+				<-wait
+				continue
+			}
+		}
 
-	if module, ok := r.classpath[moduleRoot]; ok {
+		state := &moduleClasspathState{
+			status: statusProcessing,
+			wait:   make(chan struct{}),
+		}
+		r.moduleStates[moduleRoot] = state
+		r.mu.Unlock()
+
+		jars, err := buildMavenClasspath(ctx, moduleRoot, reactorRoot)
+		module := &moduleClasspath{
+			moduleRoot:  moduleRoot,
+			reactorRoot: reactorRoot,
+			jars:        jars,
+		}
+
+		r.mu.Lock()
+		if err != nil {
+			state.status = statusFailed
+			state.err = err
+		} else {
+			state.status = statusDone
+			state.value = module
+		}
+		close(state.wait)
+		r.mu.Unlock()
+
+		if err != nil {
+			return nil, err
+		}
 		return module, nil
 	}
+}
 
-	jars, err := buildMavenClasspath(ctx, moduleRoot, reactorRoot)
-	if err != nil {
-		return nil, err
+func (r *navigationResolver) moduleClasspathError(ctx context.Context, path string) error {
+	moduleRoot, _ := findMavenRoots(path)
+	if moduleRoot == "" {
+		return nil
 	}
-	module := &moduleClasspath{
-		moduleRoot:  moduleRoot,
-		reactorRoot: reactorRoot,
-		jars:        jars,
-	}
-	r.classpath[moduleRoot] = module
-	return module, nil
+	_, err := r.moduleForPath(ctx, path)
+	return err
 }
 
 func buildMavenClasspath(ctx context.Context, moduleRoot, reactorRoot string) ([]jarArtifact, error) {

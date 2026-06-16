@@ -43,11 +43,12 @@ type completionTarget struct {
 }
 
 type completionMethod struct {
-	name       string
-	returnType string
-	params     []completionParam
-	generated  bool
-	isStatic   bool
+	name          string
+	returnType    string
+	params        []completionParam
+	generated     bool
+	isStatic      bool
+	documentation string
 }
 
 type completionParam struct {
@@ -236,16 +237,27 @@ func parseMethodCompletions(content string) []completionMethod {
 	methods := make([]completionMethod, 0)
 	existing := make(map[string]struct{})
 	ctx := parseSourceContext(content)
+	pendingDoc := ""
 
-	for _, line := range lines {
+	for index := 0; index < len(lines); index++ {
+		line := lines[index]
 		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "/**") {
+			pendingDoc, index = extractJavadoc(lines, index)
+			continue
+		}
 		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
 			continue
 		}
 		method, ok := methodSignatureForCompletion(trimmed)
 		if !ok {
+			if trimmed != "" && !strings.HasPrefix(trimmed, "@") {
+				pendingDoc = ""
+			}
 			continue
 		}
+		method.documentation = pendingDoc
+		pendingDoc = ""
 		key := method.name + "\x00" + method.returnType + "\x00" + fmt.Sprint(len(method.params))
 		if _, seen := existing[key]; seen {
 			continue
@@ -264,6 +276,49 @@ func parseMethodCompletions(content string) []completionMethod {
 	}
 
 	return methods
+}
+
+func extractTypeHeaderAndDoc(content string) (string, string) {
+	lines := strings.Split(content, "\n")
+	pendingDoc := ""
+	for index := 0; index < len(lines); index++ {
+		trimmed := strings.TrimSpace(lines[index])
+		if strings.HasPrefix(trimmed, "/**") {
+			pendingDoc, index = extractJavadoc(lines, index)
+			continue
+		}
+		if strings.Contains(trimmed, " class ") || strings.Contains(trimmed, " interface ") || strings.Contains(trimmed, " record ") || strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "interface ") || strings.HasPrefix(trimmed, "record ") || strings.HasPrefix(trimmed, "abstract class ") {
+			header := trimmed
+			for !strings.Contains(header, "{") && index+1 < len(lines) {
+				index++
+				header += " " + strings.TrimSpace(lines[index])
+			}
+			return compactWhitespace(header), pendingDoc
+		}
+		if trimmed != "" && !strings.HasPrefix(trimmed, "@") {
+			pendingDoc = ""
+		}
+	}
+	return "", ""
+}
+
+func extractJavadoc(lines []string, start int) (string, int) {
+	parts := make([]string, 0)
+	index := start
+	for ; index < len(lines); index++ {
+		trimmed := strings.TrimSpace(lines[index])
+		trimmed = strings.TrimPrefix(trimmed, "/**")
+		trimmed = strings.TrimPrefix(trimmed, "/*")
+		trimmed = strings.TrimSuffix(trimmed, "*/")
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "*"))
+		if trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+		if strings.Contains(lines[index], "*/") {
+			break
+		}
+	}
+	return strings.Join(parts, "\n"), index
 }
 
 func methodSignatureForCompletion(line string) (completionMethod, bool) {
