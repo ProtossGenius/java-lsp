@@ -234,6 +234,7 @@ type jarArtifact struct {
 
 type sourceContext struct {
 	packageName      string
+	typeName         string
 	imports          map[string]string
 	classAnnotations []string
 	fields           map[string]string
@@ -314,6 +315,9 @@ func (r *navigationResolver) definition(ctx context.Context, root string, req na
 		return nil, err
 	}
 	if method, ok := methodSymbolAtPosition(req.text, req.position); ok {
+		if xmlLocations, err := xmlMapperLocations(root, method.fqcn, method.methodName); err == nil && len(xmlLocations) > 0 {
+			return xmlLocations, nil
+		}
 		location, err := r.locationForTypeMember(ctx, root, req.path, method.fqcn, method.methodName)
 		if err != nil {
 			return nil, err
@@ -1010,8 +1014,12 @@ func parseSourceContext(text string) sourceContext {
 			continue
 		}
 		if strings.Contains(trimmed, "class ") || strings.Contains(trimmed, "interface ") || strings.Contains(trimmed, "record ") {
+			ctx.typeName = parseDeclaredTypeName(trimmed)
 			break
 		}
+	}
+	if ctx.typeName == "" {
+		ctx.typeName = parseDeclaredTypeName(firstTypeHeader(text))
 	}
 	for _, line := range strings.Split(extractFirstClassBody(text), "\n") {
 		matches := fieldDeclRE.FindStringSubmatch(line)

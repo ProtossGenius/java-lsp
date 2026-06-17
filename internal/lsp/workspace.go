@@ -79,6 +79,7 @@ func (s *Server) renameWorkspaceDocuments(root, requestURI, oldName, newName str
 	if err != nil {
 		return nil, err
 	}
+
 	documents, err := s.workspaceDocuments(root, requestURI, text)
 	if err != nil {
 		return nil, err
@@ -93,6 +94,132 @@ func (s *Server) renameWorkspaceDocuments(root, requestURI, oldName, newName str
 	}
 
 	return changes, nil
+}
+
+func renameTextEditsInLineRange(text, oldName, newName string, startLine, endLine int) []TextEdit {
+	lines := strings.Split(text, "\n")
+	oldRunes := []rune(oldName)
+	edits := make([]TextEdit, 0)
+
+	if startLine < 0 {
+		startLine = 0
+	}
+	if endLine >= len(lines) {
+		endLine = len(lines) - 1
+	}
+
+	for lineIndex := startLine; lineIndex <= endLine; lineIndex++ {
+		lineRunes := []rune(lines[lineIndex])
+		for i := 0; i+len(oldRunes) <= len(lineRunes); i++ {
+			if !runesEqual(lineRunes[i:i+len(oldRunes)], oldRunes) {
+				continue
+			}
+			if i > 0 && isJavaIdentifierPart(lineRunes[i-1]) {
+				continue
+			}
+			end := i + len(oldRunes)
+			if end < len(lineRunes) && isJavaIdentifierPart(lineRunes[end]) {
+				continue
+			}
+			edits = append(edits, TextEdit{
+				Range: Range{
+					Start: Position{Line: lineIndex, Character: i},
+					End:   Position{Line: lineIndex, Character: end},
+				},
+				NewText: newName,
+			})
+			i = end - 1
+		}
+	}
+
+	sort.SliceStable(edits, func(i, j int) bool {
+		if edits[i].Range.Start.Line != edits[j].Range.Start.Line {
+			return edits[i].Range.Start.Line > edits[j].Range.Start.Line
+		}
+		return edits[i].Range.Start.Character > edits[j].Range.Start.Character
+	})
+
+	return edits
+}
+
+func localRenameScope(text string, pos Position, name string) (int, int, bool) {
+	methodRanges := methodLineRanges(text)
+	for _, methodRange := range methodRanges {
+		if pos.Line < methodRange.start || pos.Line > methodRange.end {
+			continue
+		}
+		if !methodIntroducesName(text, methodRange.start, methodRange.end, name) {
+			return 0, 0, false
+		}
+		return methodRange.start, methodRange.end, true
+	}
+	return 0, 0, false
+}
+
+type lineRange struct {
+	start int
+	end   int
+}
+
+func methodLineRanges(text string) []lineRange {
+	lines := strings.Split(text, "\n")
+	depth := 0
+	pendingStart := -1
+	activeStart := -1
+	ranges := make([]lineRange, 0)
+	for lineIndex, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if pendingStart < 0 {
+			if _, ok := methodSignatureForCompletion(trimmed); ok {
+				pendingStart = lineIndex
+			}
+		}
+		for _, r := range line {
+			switch r {
+			case '{':
+				depth++
+				if pendingStart >= 0 && depth == 2 {
+					activeStart = pendingStart
+					pendingStart = -1
+				}
+			case '}':
+				if activeStart >= 0 && depth == 2 {
+					ranges = append(ranges, lineRange{start: activeStart, end: lineIndex})
+					activeStart = -1
+				}
+				depth--
+			}
+		}
+	}
+	return ranges
+}
+
+func methodIntroducesName(text string, methodStartLine, methodEndLine int, name string) bool {
+	lines := strings.Split(text, "\n")
+	if methodStartLine < 0 || methodStartLine >= len(lines) {
+		return false
+	}
+	signature := strings.TrimSpace(lines[methodStartLine])
+	for lineIndex := methodStartLine + 1; lineIndex < len(lines) && !looksLikeFinishedMethodSignature(signature); lineIndex++ {
+		signature += " " + strings.TrimSpace(lines[lineIndex])
+	}
+	if method, ok := methodSignatureForCompletion(compactWhitespace(signature)); ok {
+		for _, param := range method.params {
+			if param.name == name {
+				return true
+			}
+		}
+	}
+	if methodEndLine >= len(lines) {
+		methodEndLine = len(lines) - 1
+	}
+	for lineIndex := methodStartLine; lineIndex <= methodEndLine; lineIndex++ {
+		matches := fieldDeclRE.FindStringSubmatch(lines[lineIndex])
+		if len(matches) == 3 && matches[2] == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) workspaceDocuments(root, requestURI, requestText string) (map[string]string, error) {

@@ -74,7 +74,22 @@ func completionAtPosition(ctx context.Context, resolver *navigationResolver, roo
 
 	items := make([]CompletionItem, 0)
 	if memberCompletion {
+		originalPrefix := target.prefix
+		if isImportOrPackagePosition(req.text, req.position) {
+			target.prefix = ""
+		}
 		receiverType, receiverKind, err := resolveCompletionReceiverType(parsed, target.receiver)
+		if err != nil && isImportOrPackagePosition(req.text, req.position) && originalPrefix != "" {
+			if fqcn, ok := parsed.source.imports[originalPrefix]; ok {
+				receiverType = fqcn
+				receiverKind = receiverValue
+				err = nil
+			} else if fqcn, ok := parsed.projectImports[originalPrefix]; ok {
+				receiverType = fqcn
+				receiverKind = receiverValue
+				err = nil
+			}
+		}
 		if err != nil {
 			return &CompletionList{IsIncomplete: false, Items: []CompletionItem{}}, nil
 		}
@@ -233,31 +248,15 @@ func completionItemsForType(ctx context.Context, resolver *navigationResolver, r
 }
 
 func parseMethodCompletions(content string) []completionMethod {
-	lines := strings.Split(content, "\n")
 	methods := make([]completionMethod, 0)
 	existing := make(map[string]struct{})
 	ctx := parseSourceContext(content)
-	pendingDoc := ""
-
-	for index := 0; index < len(lines); index++ {
-		line := lines[index]
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "/**") {
-			pendingDoc, index = extractJavadoc(lines, index)
-			continue
-		}
-		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
-			continue
-		}
-		method, ok := methodSignatureForCompletion(trimmed)
+	for _, candidate := range collectMethodCandidates(content) {
+		method, ok := methodSignatureForCompletion(candidate.signature)
 		if !ok {
-			if trimmed != "" && !strings.HasPrefix(trimmed, "@") {
-				pendingDoc = ""
-			}
 			continue
 		}
-		method.documentation = pendingDoc
-		pendingDoc = ""
+		method.documentation = candidate.documentation
 		key := method.name + "\x00" + method.returnType + "\x00" + fmt.Sprint(len(method.params))
 		if _, seen := existing[key]; seen {
 			continue
@@ -266,7 +265,7 @@ func parseMethodCompletions(content string) []completionMethod {
 		methods = append(methods, method)
 	}
 
-	for _, method := range generatedAccessorMethods(ctx) {
+	for _, method := range generatedSyntheticMethods(ctx) {
 		key := method.name + "\x00" + method.returnType + "\x00" + fmt.Sprint(len(method.params))
 		if _, seen := existing[key]; seen {
 			continue
@@ -276,6 +275,50 @@ func parseMethodCompletions(content string) []completionMethod {
 	}
 
 	return methods
+}
+
+type methodCandidate struct {
+	signature     string
+	documentation string
+}
+
+func collectMethodCandidates(content string) []methodCandidate {
+	lines := strings.Split(content, "\n")
+	candidates := make([]methodCandidate, 0)
+	pendingDoc := ""
+	for index := 0; index < len(lines); index++ {
+		line := lines[index]
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "/**") {
+			pendingDoc, index = extractJavadoc(lines, index)
+			continue
+		}
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") || trimmed == "" {
+			continue
+		}
+		if !strings.Contains(trimmed, "(") {
+			if !strings.HasPrefix(trimmed, "@") {
+				pendingDoc = ""
+			}
+			continue
+		}
+
+		signature := trimmed
+		for !looksLikeFinishedMethodSignature(signature) && index+1 < len(lines) {
+			index++
+			signature += " " + strings.TrimSpace(lines[index])
+		}
+		candidates = append(candidates, methodCandidate{
+			signature:     compactWhitespace(signature),
+			documentation: pendingDoc,
+		})
+		pendingDoc = ""
+	}
+	return candidates
+}
+
+func looksLikeFinishedMethodSignature(signature string) bool {
+	return strings.Contains(signature, ")") && (strings.Contains(signature, "{") || strings.Contains(signature, ";"))
 }
 
 func extractTypeHeaderAndDoc(content string) (string, string) {
@@ -406,17 +449,18 @@ func splitCSV(raw string) []string {
 	return parts
 }
 
-func generatedAccessorMethods(ctx sourceContext) []completionMethod {
+func generatedSyntheticMethods(ctx sourceContext) []completionMethod {
 	methods := make([]completionMethod, 0)
 	classGetter := hasAnnotation(ctx.classAnnotations, "Data", "lombok.Data", "Getter", "lombok.Getter")
 	classSetter := hasAnnotation(ctx.classAnnotations, "Data", "lombok.Data", "Setter", "lombok.Setter")
+	classBuilder := hasAnnotation(ctx.classAnnotations, "Builder", "lombok.Builder")
 
 	for fieldName, fieldType := range ctx.fields {
 		getterEnabled := classGetter || fieldHasGeneratedAccessor(ctx, fieldName, "Getter", "lombok.Getter")
 		setterEnabled := classSetter || fieldHasGeneratedAccessor(ctx, fieldName, "Setter", "lombok.Setter")
 		if getterEnabled {
 			methods = append(methods, completionMethod{
-				name:       "get" + upperFirst(fieldName),
+				name:       getterMethodName(fieldName, fieldType),
 				returnType: fieldType,
 				generated:  true,
 			})
@@ -432,6 +476,18 @@ func generatedAccessorMethods(ctx sourceContext) []completionMethod {
 				generated: true,
 			})
 		}
+	}
+	if classBuilder && ctx.typeName != "" {
+		returnType := ctx.typeName + ".Builder"
+		if ctx.packageName != "" {
+			returnType = ctx.packageName + "." + returnType
+		}
+		methods = append(methods, completionMethod{
+			name:       "builder",
+			returnType: returnType,
+			generated:  true,
+			isStatic:   true,
+		})
 	}
 	return methods
 }
@@ -637,6 +693,13 @@ func pluralize(value string) string {
 
 func sortKey(score int, label string) string {
 	return fmt.Sprintf("%04d:%s", 9999-score, label)
+}
+
+func getterMethodName(fieldName, fieldType string) string {
+	if normalizeTypeForMatch(fieldType) == "boolean" {
+		return "is" + upperFirst(fieldName)
+	}
+	return "get" + upperFirst(fieldName)
 }
 
 func upperFirst(value string) string {

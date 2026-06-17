@@ -285,6 +285,13 @@ func (s *Server) handleHover(ctx context.Context, id json.RawMessage, raw json.R
 	if !ok {
 		return internalErrorResponse(id, errors.New("unsupported document URI"))
 	}
+	if isBlankPosition(text, params.Position) {
+		return &responseMessage{
+			JSONRPC: "2.0",
+			ID:      id,
+			Result:  nil,
+		}
+	}
 	root := s.workspaceRootForURI(params.TextDocument.URI)
 	result, err := s.navigation.hover(ctx, root, navigationRequest{
 		uri:      params.TextDocument.URI,
@@ -298,8 +305,26 @@ func (s *Server) handleHover(ctx context.Context, id json.RawMessage, raw json.R
 	return &responseMessage{
 		JSONRPC: "2.0",
 		ID:      id,
-		Result:  result,
+		Result:  normalizeNilResult(result),
 	}
+}
+
+func isBlankPosition(text string, pos Position) bool {
+	lines := strings.Split(text, "\n")
+	if pos.Line < 0 || pos.Line >= len(lines) {
+		return true
+	}
+	line := []rune(lines[pos.Line])
+	if len(line) == 0 {
+		return true
+	}
+	if pos.Character < 0 {
+		return true
+	}
+	if pos.Character >= len(line) {
+		pos.Character = len(line) - 1
+	}
+	return !isJavaIdentifierPart(line[pos.Character])
 }
 
 func (s *Server) handleCompletion(ctx context.Context, id json.RawMessage, raw json.RawMessage) *responseMessage {
@@ -472,6 +497,17 @@ func (s *Server) handleRename(id json.RawMessage, raw json.RawMessage) *response
 	}
 
 	root := s.workspaceRootForURI(params.TextDocument.URI)
+	if startLine, endLine, ok := localRenameScope(text, params.Position, oldName); ok {
+		return &responseMessage{
+			JSONRPC: "2.0",
+			ID:      id,
+			Result: WorkspaceEdit{
+				Changes: map[string][]TextEdit{
+					params.TextDocument.URI: renameTextEditsInLineRange(text, oldName, params.NewName, startLine, endLine),
+				},
+			},
+		}
+	}
 	changes, err := s.renameWorkspaceDocuments(root, params.TextDocument.URI, oldName, params.NewName)
 	if err != nil {
 		return internalErrorResponse(id, err)
@@ -579,6 +615,13 @@ func internalErrorResponse(id json.RawMessage, err error) *responseMessage {
 	}
 }
 
+func normalizeNilResult(result any) any {
+	if result == nil {
+		return json.RawMessage("null")
+	}
+	return result
+}
+
 func (s *Server) publishDiagnostics(ctx context.Context, uri, text string) {
 	path, ok := filePathFromURI(uri)
 	if !ok {
@@ -648,6 +691,24 @@ func readMessage(reader *bufio.Reader) (incomingMessage, error) {
 }
 
 func writeMessage(out io.Writer, message any) error {
+	if response, ok := message.(*responseMessage); ok && response.Error == nil && response.Result == nil {
+		payload, err := json.Marshal(map[string]any{
+			"jsonrpc": response.JSONRPC,
+			"id":      response.ID,
+			"result":  nil,
+		})
+		if err != nil {
+			return fmt.Errorf("encode response: %w", err)
+		}
+		if _, err := fmt.Fprintf(out, "Content-Length: %d\r\n\r\n", len(payload)); err != nil {
+			return fmt.Errorf("write header: %w", err)
+		}
+		if _, err := out.Write(payload); err != nil {
+			return fmt.Errorf("write payload: %w", err)
+		}
+		return nil
+	}
+
 	payload, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("encode response: %w", err)

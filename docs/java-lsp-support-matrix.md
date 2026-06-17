@@ -29,6 +29,7 @@ This document tracks the Java LSP feature surface this repository is expected to
 | JAR navigation with source jar preference | **Done** | Source jar is preferred when available. |
 | JAR navigation fallback to decompiled content | **Done** | Falls back to decompiled/javap output when no sources exist. |
 | JDK / `java.lang` navigation | **Done** | JDK types such as `RuntimeException` resolve through `src.zip`, with decompile fallback available when sources are missing. |
+| MyBatis XML mapper jump | **Done** | Java mapper methods can resolve to matching XML `<select>/<insert>/<update>/<delete>/<sql>` nodes by namespace and id. |
 
 ## Editing and refactoring
 
@@ -36,18 +37,19 @@ This document tracks the Java LSP feature surface this repository is expected to
 | --- | --- | --- |
 | `textDocument/rename` | **Done** | Workspace rename edits are generated and covered by tests. |
 | Java file rename integration | **Done** | Works with `workspace/didRenameFiles`. |
+| Local variable rename scope isolation | **Done** | Local rename stays within the enclosing method instead of leaking into sibling methods. |
 
 ## Assistance
 
 | Feature | Status | Notes |
 | --- | --- | --- |
 | `textDocument/signatureHelp` | **Done** | Current coverage includes `String.format(...)`. |
-| `textDocument/completion` | **Done** | Logger completion, Lombok accessor completion, method snippets, expected-return-type ranking, and imported JDK/JAR type completion such as `List.` are covered. |
+| `textDocument/completion` | **Done** | Logger completion, Lombok accessor completion, builder completion, method snippets, expected-return-type ranking, imported JDK/JAR type completion such as `List.`, and multiline method declarations are covered. |
 | Method completion snippets with parentheses | **Done** | Tested method completions insert parentheses and parameter placeholders. |
 | Parameter placeholder ranking | **Partial** | Basic local-variable/name matching is implemented; richer semantic matching still needed. |
 | Lombok `@Data` getter/setter completion | **Done** | Tested `@Data` request-object accessors are completed with generated getters/setters. |
 | Imported JDK / dependency type completion | **Done** | Current file imports are preferred, with workspace import fallback when needed. |
-| Hover | **Done** | Type/value/method hover is implemented for current-project and dependency-backed Java symbols. |
+| Hover | **Done** | Type/value/method hover is implemented for current-project and dependency-backed Java symbols, including null-result behavior on empty positions and Javadoc/signature enrichment where available. |
 
 ## Diagnostics
 
@@ -62,7 +64,7 @@ This document tracks the Java LSP feature surface this repository is expected to
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Go protocol tests for lifecycle/navigation/rename/signature/completion/diagnostics | **Done** | Coverage now includes JDK/runtime resolution, service-interface declaration/implementation, references, imported JDK type completion, hover, type definition, Lombok completion, and diagnostics. |
+| Go protocol tests for lifecycle/navigation/rename/signature/completion/diagnostics | **Done** | Coverage now includes JDK/runtime resolution, service-interface declaration/implementation, references, imported JDK type completion, hover, type definition, Lombok completion, scope-aware rename, XML mapper navigation, and diagnostics. |
 | Neovim regression tests for navigation | **Done** | Logger/dependency navigation, service/interface declaration/implementation, references, JDK runtime navigation, hover, and type definition are covered. |
 | Neovim regression tests for completion | **Done** | `request.` Lombok accessors and `userService.` ranking are covered. |
 | Neovim regression tests for diagnostics | **Done** | Unresolved type diagnostics are covered. |
@@ -77,13 +79,13 @@ This document tracks the Java LSP feature surface this repository is expected to
 - [x] Implement and test `textDocument/typeDefinition`
 - [x] Implement and test `textDocument/hover`
 - [x] Improve locally-detectable import/syntax diagnostics
+- [x] Fix blackbox Lombok/hover/multiline/rename/XML gaps
 
 ## Next unfinished areas
 
 - [ ] Improve parameter placeholder ranking beyond simple local-variable/name matching
 - [ ] Add richer parser-level syntax diagnostics beyond braces/missing semicolons/unresolved types
 - [ ] Add deeper Maven/Gradle model diagnostics (dependency/import/build state)
-- [ ] Implement `textDocument/hover` detail enrichment (documentation/comments, not just signatures)
 
 ## Indexing and cache behavior
 

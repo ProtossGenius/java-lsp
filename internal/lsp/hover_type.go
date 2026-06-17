@@ -68,6 +68,9 @@ func (r *navigationResolver) typeDefinition(ctx context.Context, root string, re
 
 	identifier, err := wordAtPosition(req.text, req.position)
 	if err != nil {
+		if isNoHoverSymbolError(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	if typeFQCN, ok := resolveValueType(source, locals, workspaceImports, identifier); ok {
@@ -191,6 +194,18 @@ func hoverForValue(typeFQCN, identifier string) *Hover {
 			Kind:  "markdown",
 			Value: "```java\n" + typeFQCN + " " + identifier + "\n```",
 		},
+	}
+}
+
+func isNoHoverSymbolError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Error() {
+	case "position is on an empty line", "position does not point to a Java identifier":
+		return true
+	default:
+		return false
 	}
 }
 
