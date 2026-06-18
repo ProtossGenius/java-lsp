@@ -992,44 +992,6 @@ func (r *navigationResolver) decompileClass(jarPath, fqcn string, module *module
 	return outputPath, nil
 }
 
-func parseSourceContext(text string) sourceContext {
-	ctx := sourceContext{
-		imports: make(map[string]string),
-		fields:  make(map[string]string),
-	}
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "package ") {
-			ctx.packageName = strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(trimmed, "package ")), ";")
-			continue
-		}
-		if strings.HasPrefix(trimmed, "import ") {
-			importPath := strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(trimmed, "import ")), ";")
-			importPath = strings.TrimPrefix(importPath, "static ")
-			ctx.imports[simpleName(importPath)] = importPath
-			continue
-		}
-		if strings.HasPrefix(trimmed, "@") {
-			ctx.classAnnotations = append(ctx.classAnnotations, strings.TrimPrefix(strings.Fields(trimmed)[0], "@"))
-			continue
-		}
-		if strings.Contains(trimmed, "class ") || strings.Contains(trimmed, "interface ") || strings.Contains(trimmed, "record ") {
-			ctx.typeName = parseDeclaredTypeName(trimmed)
-			break
-		}
-	}
-	if ctx.typeName == "" {
-		ctx.typeName = parseDeclaredTypeName(firstTypeHeader(text))
-	}
-	for _, line := range strings.Split(extractFirstClassBody(text), "\n") {
-		matches := fieldDeclRE.FindStringSubmatch(line)
-		if len(matches) == 3 {
-			ctx.fields[matches[2]] = matches[1]
-		}
-	}
-	return ctx
-}
-
 func extractFirstClassBody(text string) string {
 	index := strings.Index(text, "{")
 	if index < 0 {

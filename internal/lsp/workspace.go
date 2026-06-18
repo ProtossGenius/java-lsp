@@ -222,6 +222,10 @@ func methodIntroducesName(text string, methodStartLine, methodEndLine int, name 
 	return false
 }
 
+func looksLikeFinishedMethodSignature(signature string) bool {
+	return strings.Contains(signature, ")") && (strings.Contains(signature, "{") || strings.Contains(signature, ";"))
+}
+
 func (s *Server) workspaceDocuments(root, requestURI, requestText string) (map[string]string, error) {
 	documents := make(map[string]string)
 

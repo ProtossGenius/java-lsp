@@ -247,123 +247,6 @@ func completionItemsForType(ctx context.Context, resolver *navigationResolver, r
 	return filtered, nil
 }
 
-func parseMethodCompletions(content string) []completionMethod {
-	methods := make([]completionMethod, 0)
-	existing := make(map[string]struct{})
-	ctx := parseSourceContext(content)
-	for _, candidate := range collectMethodCandidates(content) {
-		method, ok := methodSignatureForCompletion(candidate.signature)
-		if !ok {
-			continue
-		}
-		method.documentation = candidate.documentation
-		key := method.name + "\x00" + method.returnType + "\x00" + fmt.Sprint(len(method.params))
-		if _, seen := existing[key]; seen {
-			continue
-		}
-		existing[key] = struct{}{}
-		methods = append(methods, method)
-	}
-
-	for _, method := range generatedSyntheticMethods(ctx) {
-		key := method.name + "\x00" + method.returnType + "\x00" + fmt.Sprint(len(method.params))
-		if _, seen := existing[key]; seen {
-			continue
-		}
-		existing[key] = struct{}{}
-		methods = append(methods, method)
-	}
-
-	return methods
-}
-
-type methodCandidate struct {
-	signature     string
-	documentation string
-}
-
-func collectMethodCandidates(content string) []methodCandidate {
-	lines := strings.Split(content, "\n")
-	candidates := make([]methodCandidate, 0)
-	pendingDoc := ""
-	for index := 0; index < len(lines); index++ {
-		line := lines[index]
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "/**") {
-			pendingDoc, index = extractJavadoc(lines, index)
-			continue
-		}
-		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") || trimmed == "" {
-			continue
-		}
-		if !strings.Contains(trimmed, "(") {
-			if !strings.HasPrefix(trimmed, "@") {
-				pendingDoc = ""
-			}
-			continue
-		}
-
-		signature := trimmed
-		for !looksLikeFinishedMethodSignature(signature) && index+1 < len(lines) {
-			index++
-			signature += " " + strings.TrimSpace(lines[index])
-		}
-		candidates = append(candidates, methodCandidate{
-			signature:     compactWhitespace(signature),
-			documentation: pendingDoc,
-		})
-		pendingDoc = ""
-	}
-	return candidates
-}
-
-func looksLikeFinishedMethodSignature(signature string) bool {
-	return strings.Contains(signature, ")") && (strings.Contains(signature, "{") || strings.Contains(signature, ";"))
-}
-
-func extractTypeHeaderAndDoc(content string) (string, string) {
-	lines := strings.Split(content, "\n")
-	pendingDoc := ""
-	for index := 0; index < len(lines); index++ {
-		trimmed := strings.TrimSpace(lines[index])
-		if strings.HasPrefix(trimmed, "/**") {
-			pendingDoc, index = extractJavadoc(lines, index)
-			continue
-		}
-		if strings.Contains(trimmed, " class ") || strings.Contains(trimmed, " interface ") || strings.Contains(trimmed, " record ") || strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "interface ") || strings.HasPrefix(trimmed, "record ") || strings.HasPrefix(trimmed, "abstract class ") {
-			header := trimmed
-			for !strings.Contains(header, "{") && index+1 < len(lines) {
-				index++
-				header += " " + strings.TrimSpace(lines[index])
-			}
-			return compactWhitespace(header), pendingDoc
-		}
-		if trimmed != "" && !strings.HasPrefix(trimmed, "@") {
-			pendingDoc = ""
-		}
-	}
-	return "", ""
-}
-
-func extractJavadoc(lines []string, start int) (string, int) {
-	parts := make([]string, 0)
-	index := start
-	for ; index < len(lines); index++ {
-		trimmed := strings.TrimSpace(lines[index])
-		trimmed = strings.TrimPrefix(trimmed, "/**")
-		trimmed = strings.TrimPrefix(trimmed, "/*")
-		trimmed = strings.TrimSuffix(trimmed, "*/")
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "*"))
-		if trimmed != "" {
-			parts = append(parts, trimmed)
-		}
-		if strings.Contains(lines[index], "*/") {
-			break
-		}
-	}
-	return strings.Join(parts, "\n"), index
-}
-
 func methodSignatureForCompletion(line string) (completionMethod, bool) {
 	matches := methodDeclRE.FindStringSubmatch(line)
 	if len(matches) != 4 {
@@ -625,7 +508,8 @@ func parseLocalVariables(text string, pos Position) map[string]string {
 	locals := make(map[string]string)
 	lastMethodParams := []completionParam{}
 	for i := 0; i <= limit; i++ {
-		line := strings.TrimSpace(lines[i])
+		rawLine := lines[i]
+		line := strings.TrimSpace(rawLine)
 		if line == "" || strings.HasPrefix(line, "@") {
 			continue
 		}
@@ -636,7 +520,7 @@ func parseLocalVariables(text string, pos Position) map[string]string {
 		if strings.HasPrefix(line, "for ") || strings.HasPrefix(line, "if ") || strings.HasPrefix(line, "return ") {
 			continue
 		}
-		if matches := fieldDeclRE.FindStringSubmatch(line); len(matches) == 3 {
+		if matches := fieldDeclRE.FindStringSubmatch(rawLine); len(matches) == 3 {
 			locals[matches[2]] = compactType(matches[1])
 		}
 	}
