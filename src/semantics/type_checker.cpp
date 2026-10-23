@@ -208,9 +208,32 @@ static bool isDeclaredTypeParameter(TSNode node, const std::string& typeName, co
 }
 
 static bool findTypeInClassHierarchy(const JavaClass& cls, const std::string& typeName) {
-    if (cls.name == typeName) return true;
+    if (cls.name == typeName || cls.fqn == typeName) return true;
+    if (cls.fqn.size() > typeName.size() &&
+        cls.fqn.compare(cls.fqn.size() - typeName.size(), typeName.size(), typeName) == 0 &&
+        cls.fqn[cls.fqn.size() - typeName.size() - 1] == '.') {
+        return true;
+    }
     for (const auto& inner : cls.innerClasses) {
         if (findTypeInClassHierarchy(inner, typeName)) return true;
+    }
+    return false;
+}
+
+static bool isPartOfScopedTypeIdentifier(TSNode node) {
+    TSNode cur = ts_node_parent(node);
+    while (!ts_node_is_null(cur)) {
+        std::string pt = ts_node_type(cur);
+        if (pt == "scoped_type_identifier") {
+            return true;
+        }
+        if (pt == "generic_type" || pt == "type_arguments" || pt == "formal_parameters" ||
+            pt == "variable_declarator" || pt == "local_variable_declaration" ||
+            pt == "field_declaration" || pt == "method_declaration" || pt == "class_declaration" ||
+            pt == "interface_declaration") {
+            break;
+        }
+        cur = ts_node_parent(cur);
     }
     return false;
 }
@@ -227,9 +250,38 @@ void TypeChecker::collectDiagnostics(
 
     std::string type = ts_node_type(node);
 
+    // Check for unresolved scoped_type_identifier (e.g. java.util.StringTokenizer or Outer.Inner)
+    if (type == "scoped_type_identifier") {
+        if (!isPartOfScopedTypeIdentifier(node)) {
+            if (!isTypeDeclarationOrImport(node)) {
+                std::string typeName = getNodeText(node, src);
+                if (!isDeclaredTypeParameter(node, typeName, src)) {
+                    const JavaClass* resolved = symTab.resolveClass(typeName, cu);
+                    if (!resolved) {
+                        bool foundLocal = false;
+                        for (const auto& c : cu.classes) {
+                            if (findTypeInClassHierarchy(c, typeName)) {
+                                foundLocal = true;
+                                break;
+                            }
+                        }
+                        if (!foundLocal) {
+                            Diagnostic d;
+                            d.range = getNodeRange(node);
+                            d.severity = 1; // Error
+                            d.source = "java-lsp";
+                            d.message = typeName + " cannot be resolved to a type";
+                            diags.push_back(d);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Check for unresolved type_identifier
     if (type == "type_identifier") {
-        if (!isTypeDeclarationOrImport(node)) {
+        if (!isPartOfScopedTypeIdentifier(node) && !isTypeDeclarationOrImport(node)) {
             std::string typeName = getNodeText(node, src);
             // Exclude primitive wrappers, void, var, or single-letter type variables
             if (typeName != "void" && typeName != "var" &&

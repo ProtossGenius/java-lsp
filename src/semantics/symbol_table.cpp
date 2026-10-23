@@ -21,7 +21,12 @@ void SymbolTable::clear() {
 }
 
 static const JavaClass* findInClassHierarchy(const JavaClass& cls, const std::string& targetName) {
-    if (cls.name == targetName) return &cls;
+    if (cls.name == targetName || cls.fqn == targetName) return &cls;
+    if (cls.fqn.size() > targetName.size() &&
+        cls.fqn.compare(cls.fqn.size() - targetName.size(), targetName.size(), targetName) == 0 &&
+        cls.fqn[cls.fqn.size() - targetName.size() - 1] == '.') {
+        return &cls;
+    }
     for (const auto& inner : cls.innerClasses) {
         auto found = findInClassHierarchy(inner, targetName);
         if (found) return found;
@@ -87,9 +92,45 @@ const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const 
         if (found) return found;
     }
 
-    // 1. Fully qualified already?
+    // 1. Fully qualified already or qualified inner class?
     if (simpleName.find('.') != std::string::npos) {
-        return findClassByFqn(simpleName);
+        auto cls = findClassByFqn(simpleName);
+        if (cls) return cls;
+
+        // Try same package (e.g. cu package + "." + simpleName for Outer.Inner)
+        if (!cu.packageName.empty()) {
+            cls = findClassByFqn(cu.packageName + "." + simpleName);
+            if (cls) return cls;
+        }
+
+        // Try explicit imports matching the prefix (e.g. import java.util.Map -> Map.Entry)
+        size_t firstDot = simpleName.find('.');
+        std::string rootName = simpleName.substr(0, firstDot);
+        std::string rest = simpleName.substr(firstDot);
+        for (const auto& imp : cu.imports) {
+            if (imp.rfind(".*") != std::string::npos) continue;
+            size_t lastDot = imp.find_last_of('.');
+            std::string impName = (lastDot != std::string::npos) ? imp.substr(lastDot + 1) : imp;
+            if (impName == rootName) {
+                cls = findClassByFqn(imp + rest);
+                if (cls) return cls;
+            }
+        }
+
+        // Try wildcard imports
+        for (const auto& imp : cu.imports) {
+            if (imp.length() >= 2 && imp.substr(imp.length() - 2) == ".*") {
+                std::string pkg = imp.substr(0, imp.length() - 2);
+                cls = findClassByFqn(pkg + "." + simpleName);
+                if (cls) return cls;
+            }
+        }
+
+        // Try standard JDK java.lang and java.util
+        cls = findClassByFqn("java.lang." + simpleName);
+        if (cls) return cls;
+        cls = findClassByFqn("java.util." + simpleName);
+        if (cls) return cls;
     }
 
     // 2. Same package
@@ -185,7 +226,7 @@ void SymbolTable::registerJdkTypes() {
     std::vector<std::string> utilTypes = {
         "Optional", "Map", "Set", "Collection", "Queue", "Deque", "Iterator",
         "ArrayList", "LinkedList", "HashMap", "LinkedHashMap", "TreeMap", "HashSet", "LinkedHashSet", "TreeSet",
-        "Arrays", "Collections", "Objects", "UUID", "Date", "Calendar", "Random", "Scanner",
+        "Arrays", "Collections", "Objects", "UUID", "Date", "Calendar", "Random", "Scanner", "StringTokenizer", "StringJoiner", "Base64",
         "CompletableFuture", "Future", "Callable", "Function", "Predicate", "Consumer", "Supplier", "BiFunction"
     };
     for (const auto& t : utilTypes) {
