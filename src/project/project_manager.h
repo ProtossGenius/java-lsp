@@ -23,6 +23,7 @@ public:
     void updateFile(const std::string& uri, const std::string& newContent);
     void closeFile(const std::string& uri);
 
+    std::string getFileContent(const std::string& uri);
     std::shared_ptr<Scope> getFileScope(const std::string& uri);
 
     std::string getRootPath() const { return rootPath_; }

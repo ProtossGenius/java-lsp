@@ -21,6 +21,18 @@ void SymbolTable::clear() {
 
 void SymbolTable::addClass(const JavaClass& cls) {
     std::string fqn = cls.fqn.empty() ? cls.name : cls.fqn;
+
+    // Do not overwrite rich source class with a stub without methods or filePath
+    auto it = classesByFqn_.find(fqn);
+    if (it != classesByFqn_.end()) {
+        if (!it->second.filePath.empty() && cls.filePath.empty()) {
+            return;
+        }
+        if (!it->second.methods.empty() && cls.methods.empty()) {
+            return;
+        }
+    }
+
     classesByFqn_[fqn] = cls;
     auto& list = fqnsByName_[cls.name];
     bool exists = false;
@@ -97,13 +109,122 @@ const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const 
 
 std::vector<JavaClass> SymbolTable::getAllClasses() const {
     std::vector<JavaClass> result;
+    result.reserve(classesByFqn_.size());
     for (const auto& pair : classesByFqn_) {
         result.push_back(pair.second);
     }
     return result;
 }
 
+std::vector<JavaClass> SymbolTable::findClassesMatchingPrefix(const std::string& prefix) const {
+    std::vector<JavaClass> result;
+    if (prefix.empty()) return result;
+    for (const auto& pair : classesByFqn_) {
+        const auto& name = pair.second.name;
+        if (name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0) {
+            result.push_back(pair.second);
+            if (result.size() >= 50) break;
+        }
+    }
+    return result;
+}
+
 void SymbolTable::registerJdkTypes() {
+    auto registerSimpleClass = [&](const std::string& pkg, const std::string& name) {
+        JavaClass c;
+        c.name = name;
+        c.packageName = pkg;
+        c.fqn = pkg + "." + name;
+        c.kind = ClassKind::CLASS;
+        addClass(c);
+        return c;
+    };
+
+    // Standard java.lang types
+    std::vector<std::string> langTypes = {
+        "Long", "Integer", "Short", "Byte", "Double", "Float", "Boolean", "Character", "Number",
+        "Void", "Class", "Throwable", "Exception", "RuntimeException", "IllegalArgumentException",
+        "IllegalStateException", "NullPointerException", "IndexOutOfBoundsException",
+        "UnsupportedOperationException", "SecurityException", "ClassCastException",
+        "StringBuilder", "StringBuffer", "Math", "System", "Thread", "Runnable",
+        "Comparable", "CharSequence", "Iterable", "AutoCloseable", "Record", "Enum"
+    };
+    for (const auto& t : langTypes) {
+        registerSimpleClass("java.lang", t);
+    }
+
+    // Standard java.util types
+    std::vector<std::string> utilTypes = {
+        "Optional", "Map", "Set", "Collection", "Queue", "Deque", "Iterator",
+        "ArrayList", "LinkedList", "HashMap", "LinkedHashMap", "TreeMap", "HashSet", "LinkedHashSet", "TreeSet",
+        "Arrays", "Collections", "Objects", "UUID", "Date", "Calendar", "Random", "Scanner",
+        "CompletableFuture", "Future", "Callable", "Function", "Predicate", "Consumer", "Supplier", "BiFunction"
+    };
+    for (const auto& t : utilTypes) {
+        registerSimpleClass("java.util", t);
+    }
+
+    // java.io
+    std::vector<std::string> ioTypes = {
+        "File", "InputStream", "OutputStream", "Reader", "Writer", "BufferedReader", "BufferedWriter", "IOException"
+    };
+    for (const auto& t : ioTypes) {
+        registerSimpleClass("java.io", t);
+    }
+
+    // java.time
+    std::vector<std::string> timeTypes = {
+        "LocalDate", "LocalTime", "LocalDateTime", "Instant", "Duration", "Period", "ZoneId", "ZonedDateTime"
+    };
+    for (const auto& t : timeTypes) {
+        registerSimpleClass("java.time", t);
+    }
+
+    // Common annotations (Spring, Jakarta, Lombok, MyBatis)
+    std::vector<std::pair<std::string, std::string>> annotations = {
+        {"jakarta.validation.constraints", "NotNull"},
+        {"jakarta.validation.constraints", "NotBlank"},
+        {"jakarta.validation.constraints", "NotEmpty"},
+        {"jakarta.validation.constraints", "Email"},
+        {"jakarta.validation.constraints", "Min"},
+        {"jakarta.validation.constraints", "Max"},
+        {"jakarta.validation.constraints", "Size"},
+        {"org.springframework.boot.autoconfigure", "SpringBootApplication"},
+        {"org.springframework.web.bind.annotation", "RestController"},
+        {"org.springframework.web.bind.annotation", "Controller"},
+        {"org.springframework.web.bind.annotation", "GetMapping"},
+        {"org.springframework.web.bind.annotation", "PostMapping"},
+        {"org.springframework.web.bind.annotation", "PutMapping"},
+        {"org.springframework.web.bind.annotation", "DeleteMapping"},
+        {"org.springframework.web.bind.annotation", "RequestMapping"},
+        {"org.springframework.web.bind.annotation", "PathVariable"},
+        {"org.springframework.web.bind.annotation", "RequestParam"},
+        {"org.springframework.web.bind.annotation", "RequestBody"},
+        {"org.springframework.beans.factory.annotation", "Autowired"},
+        {"org.springframework.stereotype", "Service"},
+        {"org.springframework.stereotype", "Component"},
+        {"org.springframework.stereotype", "Repository"},
+        {"org.springframework.http", "ResponseEntity"},
+        {"org.springframework.http", "HttpStatus"},
+        {"org.apache.ibatis.annotations", "Param"},
+        {"org.apache.ibatis.annotations", "Mapper"},
+        {"org.apache.ibatis.annotations", "Select"},
+        {"org.apache.ibatis.annotations", "Insert"},
+        {"org.apache.ibatis.annotations", "Update"},
+        {"org.apache.ibatis.annotations", "Delete"},
+        {"lombok", "Data"},
+        {"lombok", "Builder"},
+        {"lombok", "NoArgsConstructor"},
+        {"lombok", "AllArgsConstructor"},
+        {"lombok", "Getter"},
+        {"lombok", "Setter"},
+        {"lombok", "ToString"},
+        {"lombok", "EqualsAndHashCode"},
+        {"lombok.extern.slf4j", "Slf4j"}
+    };
+    for (const auto& a : annotations) {
+        registerSimpleClass(a.first, a.second);
+    }
     // java.lang.Object
     {
         JavaClass obj;

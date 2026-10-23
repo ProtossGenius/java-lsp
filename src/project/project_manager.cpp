@@ -1,4 +1,7 @@
 #include "project/project_manager.h"
+#include "project/dependency_resolver.h"
+#include "mybatis/mybatis_xml.h"
+#include "mybatis/mysql_service.h"
 #include "semantics/lombok.h"
 #include "semantics/nested_lambda.h"
 #include "utils/fs_utils.h"
@@ -32,6 +35,23 @@ void ProjectManager::indexWorkspace() {
     for (const auto& path : javaFiles) {
         indexJavaFile(path);
     }
+
+    // Index MyBatis XML files
+    auto xmlFiles = fs::listFilesRecursively(rootPath_, ".xml");
+    for (const auto& xf : xmlFiles) {
+        std::string content = fs::readFile(xf);
+        std::string uri = fs::pathToUri(xf);
+        if (MyBatisXmlService::instance().isMapperXml(uri, content)) {
+            MyBatisXmlService::instance().indexMapperXml(uri, content);
+            fileBuffers_[uri] = content;
+        }
+    }
+
+    // Initialize MySQL configuration
+    MySQLService::instance().detectConfig(rootPath_);
+
+    // Resolve JDK and external dependencies
+    DependencyResolver::instance().resolveAll(rootPath_, symTab_);
 }
 
 void ProjectManager::indexJavaFile(const std::string& path) {
@@ -43,6 +63,7 @@ void ProjectManager::indexJavaFile(const std::string& path) {
 
     // Process Lombok for each class
     for (auto& cls : cu->classes) {
+        cls.filePath = path;
         LombokHandler::processClass(cls);
         symTab_.addClass(cls);
     }
@@ -96,6 +117,14 @@ std::shared_ptr<JavaCompilationUnit> ProjectManager::getCompilationUnit(const st
 void ProjectManager::updateFile(const std::string& uri, const std::string& newContent) {
     std::lock_guard<std::mutex> lock(mutex_);
     fileBuffers_[uri] = newContent;
+
+    // Handle MyBatis XML
+    if ((uri.size() >= 4 && uri.substr(uri.size() - 4) == ".xml") ||
+        MyBatisXmlService::instance().isMapperXml(uri, newContent)) {
+        MyBatisXmlService::instance().indexMapperXml(uri, newContent);
+        return;
+    }
+
     std::string path = fs::uriToPath(uri);
 
     auto cu = parser_.parse(newContent, path);
@@ -109,6 +138,7 @@ void ProjectManager::updateFile(const std::string& uri, const std::string& newCo
     }
 
     for (auto& cls : cu->classes) {
+        cls.filePath = path;
         LombokHandler::processClass(cls);
         symTab_.addClass(cls);
     }
@@ -143,6 +173,18 @@ void ProjectManager::updateFile(const std::string& uri, const std::string& newCo
 
 void ProjectManager::closeFile(const std::string& uri) {
     // Keep cached CU for cross-file navigation
+}
+
+std::string ProjectManager::getFileContent(const std::string& uri) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = fileBuffers_.find(uri);
+    if (it != fileBuffers_.end()) return it->second;
+    std::string path = fs::uriToPath(uri);
+    std::string content = fs::readFile(path);
+    if (!content.empty()) {
+        fileBuffers_[uri] = content;
+    }
+    return content;
 }
 
 std::shared_ptr<Scope> ProjectManager::getFileScope(const std::string& uri) {

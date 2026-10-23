@@ -1,6 +1,8 @@
 #include "lsp/server.h"
 #include "semantics/type_checker.h"
 #include "project/decompilation.h"
+#include "mybatis/mybatis_xml.h"
+#include "mybatis/mysql_service.h"
 #include "utils/fs_utils.h"
 #include "utils/logger.h"
 #include <tree_sitter/api.h>
@@ -112,6 +114,20 @@ void Server::handleInitialize(const llvm::json::Value& id, const llvm::json::Val
         pm_.initWorkspace(rootPath);
     }
 
+    if (pobj) {
+        if (auto initOpts = pobj->getObject("initializationOptions")) {
+            if (auto mysqlOpt = initOpts->getObject("mysql")) {
+                MySQLConfig cfg = MySQLService::instance().getConfig();
+                if (auto h = mysqlOpt->getString("host")) cfg.host = h->str();
+                if (auto p = mysqlOpt->getInteger("port")) cfg.port = *p;
+                if (auto u = mysqlOpt->getString("user")) cfg.user = u->str();
+                if (auto pw = mysqlOpt->getString("password")) cfg.password = pw->str();
+                if (auto d = mysqlOpt->getString("database")) cfg.database = d->str();
+                MySQLService::instance().setConfig(cfg);
+            }
+        }
+    }
+
     llvm::json::Object capabilities{
         {"textDocumentSync", 1}, // Full sync
         {"completionProvider", llvm::json::Object{
@@ -212,7 +228,16 @@ void Server::handleTextDocumentCompletion(const llvm::json::Value& id, const llv
         return;
     }
 
-    auto cu = pm_.getCompilationUnit(uri->str());
+    std::string uriStr = uri->str();
+    std::string content = pm_.getFileContent(uriStr);
+    if ((uriStr.size() >= 4 && uriStr.substr(uriStr.size() - 4) == ".xml") ||
+        MyBatisXmlService::instance().isMapperXml(uriStr, content)) {
+        auto list = MyBatisXmlService::instance().complete(uriStr, pos, content, symTab_);
+        transport_.writeResponse(id, toJson(list));
+        return;
+    }
+
+    auto cu = pm_.getCompilationUnit(uriStr);
     if (!cu) {
         LOG_WARN("handleTextDocumentCompletion: CU not found for " + uri->str());
         transport_.writeResponse(id, nullptr);
@@ -265,7 +290,20 @@ void Server::handleTextDocumentDefinition(const llvm::json::Value& id, const llv
     Position pos;
     if (!uri || !parsePosition(*posVal, pos)) { transport_.writeResponse(id, nullptr); return; }
 
-    auto cu = pm_.getCompilationUnit(uri->str());
+    std::string uriStr = uri->str();
+    std::string content = pm_.getFileContent(uriStr);
+
+    auto mybatisLocs = MyBatisXmlService::instance().findDefinitions(uriStr, pos, content, symTab_);
+    if (!mybatisLocs.empty()) {
+        llvm::json::Array arr;
+        for (const auto& l : mybatisLocs) {
+            arr.push_back(toJson(l));
+        }
+        transport_.writeResponse(id, llvm::json::Value(std::move(arr)));
+        return;
+    }
+
+    auto cu = pm_.getCompilationUnit(uriStr);
     if (!cu) { transport_.writeResponse(id, nullptr); return; }
 
     std::istringstream stream(cu->sourceText);
@@ -537,20 +575,48 @@ void Server::handleTextDocumentHover(const llvm::json::Value& id, const llvm::js
         if (!std::getline(stream, line)) { line = ""; break; }
     }
     std::string symbol = extractSymbolAtPosition(line, pos.character);
+    std::string fullExpr = extractFullExpressionAtPosition(line, pos.character);
 
-    // Look for method in compilation unit or symbol table
-    for (const auto& cls : symTab_.getAllClasses()) {
-        for (const auto& m : cls.methods) {
-            if (m.name == symbol) {
-                std::string markdown = "```java\n" + m.returnType.toString() + " " + m.signature() + "\n```";
-                if (!m.docComment.empty()) {
-                    markdown += "\n" + m.docComment;
+    const JavaMethod* matchedMethod = nullptr;
+    auto scope = pm_.getFileScope(uri->str());
+    auto inner = scope ? scope->findInnermostScope(pos) : scope;
+
+    size_t lastDot = fullExpr.find_last_of('.');
+    if (lastDot != std::string::npos) {
+        std::string recv = fullExpr.substr(0, lastDot);
+        JavaTypeRef rt = TypeChecker::resolveExpressionType(recv, inner, *cu, symTab_);
+        const JavaClass* rcls = symTab_.resolveClass(rt.name, *cu);
+        if (rcls) {
+            for (const auto& m : rcls->methods) {
+                if (m.name == symbol) {
+                    matchedMethod = &m;
+                    break;
                 }
-                Hover h{markdown, std::nullopt};
-                transport_.writeResponse(id, toJson(h));
-                return;
             }
         }
+    }
+
+    if (!matchedMethod) {
+        for (const auto& cls : symTab_.getAllClasses()) {
+            for (const auto& m : cls.methods) {
+                if (m.name == symbol) {
+                    if (!matchedMethod || matchedMethod->docComment.empty()) {
+                        matchedMethod = &m;
+                        if (!m.docComment.empty()) break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (matchedMethod) {
+        std::string markdown = "```java\n" + matchedMethod->returnType.toString() + " " + matchedMethod->signature() + "\n```";
+        if (!matchedMethod->docComment.empty()) {
+            markdown += "\n" + matchedMethod->docComment;
+        }
+        Hover h{markdown, std::nullopt};
+        transport_.writeResponse(id, toJson(h));
+        return;
     }
 
     transport_.writeResponse(id, nullptr);

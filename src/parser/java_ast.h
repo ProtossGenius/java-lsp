@@ -111,6 +111,7 @@ struct JavaClass {
     std::string name;
     std::string packageName;
     std::string fqn;
+    std::string filePath;
     ClassKind kind{ClassKind::CLASS};
     std::optional<JavaTypeRef> extendsType;
     std::vector<JavaTypeRef> implementsTypes;

@@ -148,6 +148,33 @@ std::vector<Diagnostic> TypeChecker::check(
     return diags;
 }
 
+static bool isTypeDeclarationOrImport(TSNode node) {
+    TSNode cur = node;
+    while (!ts_node_is_null(cur)) {
+        std::string t = ts_node_type(cur);
+        if (t == "import_declaration" || t == "package_declaration") {
+            return true;
+        }
+        if (t == "type_parameters" || t == "type_parameter") {
+            return true;
+        }
+        TSNode parent = ts_node_parent(cur);
+        if (!ts_node_is_null(parent)) {
+            std::string pt = ts_node_type(parent);
+            if (pt == "class_declaration" || pt == "interface_declaration" ||
+                pt == "enum_declaration" || pt == "record_declaration" ||
+                pt == "annotation_type_declaration") {
+                TSNode nameNode = ts_node_child_by_field_name(parent, "name", 4);
+                if (!ts_node_is_null(nameNode) && ts_node_eq(nameNode, cur)) {
+                    return true;
+                }
+            }
+        }
+        cur = parent;
+    }
+    return false;
+}
+
 void TypeChecker::collectDiagnostics(
     TSNode node,
     const std::string& src,
@@ -162,26 +189,29 @@ void TypeChecker::collectDiagnostics(
 
     // Check for unresolved type_identifier
     if (type == "type_identifier") {
-        std::string typeName = getNodeText(node, src);
-        // Exclude primitive wrappers or standard generics if recognized
-        if (typeName != "void" && typeName != "var" && typeName != "T" && typeName != "E" && typeName != "R" && typeName != "K" && typeName != "V") {
-            const JavaClass* resolved = symTab.resolveClass(typeName, cu);
-            if (!resolved) {
-                // Check if defined in current compilation unit
-                bool foundLocal = false;
-                for (const auto& c : cu.classes) {
-                    if (c.name == typeName) {
-                        foundLocal = true;
-                        break;
+        if (!isTypeDeclarationOrImport(node)) {
+            std::string typeName = getNodeText(node, src);
+            // Exclude primitive wrappers, void, var, or single-letter type variables
+            if (typeName != "void" && typeName != "var" &&
+                !(typeName.size() <= 2 && std::isupper(typeName[0]))) {
+
+                const JavaClass* resolved = symTab.resolveClass(typeName, cu);
+                if (!resolved) {
+                    bool foundLocal = false;
+                    for (const auto& c : cu.classes) {
+                        if (c.name == typeName) {
+                            foundLocal = true;
+                            break;
+                        }
                     }
-                }
-                if (!foundLocal) {
-                    Diagnostic d;
-                    d.range = getNodeRange(node);
-                    d.severity = 1; // Error
-                    d.source = "java-lsp";
-                    d.message = typeName + " cannot be resolved to a type";
-                    diags.push_back(d);
+                    if (!foundLocal) {
+                        Diagnostic d;
+                        d.range = getNodeRange(node);
+                        d.severity = 1; // Error
+                        d.source = "java-lsp";
+                        d.message = typeName + " cannot be resolved to a type";
+                        diags.push_back(d);
+                    }
                 }
             }
         }

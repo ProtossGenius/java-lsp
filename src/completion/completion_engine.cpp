@@ -12,33 +12,74 @@ CompletionEngine::CompletionEngine(const SymbolTable& symTab)
 
 std::pair<std::string, std::string> CompletionEngine::extractTriggerAndPrefix(
     const std::string& line, int character) const {
-    if (character < static_cast<int>(line.size()) && line[character] == '.') {
-        character++;
-    }
     if (character > static_cast<int>(line.size())) character = static_cast<int>(line.size());
-    std::string prefix = line.substr(0, character);
 
-    // Look for dot
-    size_t lastDot = prefix.find_last_of('.');
-    if (lastDot == std::string::npos) {
-        // No dot, extract word prefix
-        size_t wordStart = prefix.find_last_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_");
-        std::string word = (wordStart == std::string::npos) ? prefix : prefix.substr(wordStart + 1);
-        return {"", word};
+    // 1. Find the word (token) currently being typed up to `character`
+    // Word characters: alphanumeric, '_', or '@' (for annotations)
+    int wordEnd = character;
+    int wordStart = character;
+    while (wordStart > 0) {
+        char ch = line[wordStart - 1];
+        if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '@') {
+            wordStart--;
+        } else {
+            break;
+        }
     }
 
-    std::string afterDot = prefix.substr(lastDot + 1);
-    std::string beforeDot = prefix.substr(0, lastDot);
+    std::string filterPrefix = line.substr(wordStart, wordEnd - wordStart);
+    if (!filterPrefix.empty() && filterPrefix.front() == '@') {
+        filterPrefix = filterPrefix.substr(1);
+    }
 
-    // Extract receiver before dot
-    size_t exprStart = beforeDot.find_last_of(" =;({[,+-*/?:\t");
-    std::string receiver = (exprStart == std::string::npos) ? beforeDot : beforeDot.substr(exprStart + 1);
+    // 2. Check if immediately before the word, there is a dot `.`
+    // E.g. "user.get" -> wordStart is at 'g', line[wordStart-1] is '.'
+    // E.g. "user."    -> wordStart is at end (word is ""), line[wordStart-1] is '.'
+    int beforeWord = wordStart;
+    while (beforeWord > 0 && (line[beforeWord - 1] == ' ' || line[beforeWord - 1] == '\t')) {
+        beforeWord--;
+    }
 
-    // Trim whitespace
-    while (!receiver.empty() && (receiver.front() == ' ' || receiver.front() == '\t')) receiver.erase(receiver.begin());
-    while (!receiver.empty() && (receiver.back() == ' ' || receiver.back() == '\t')) receiver.pop_back();
+    if (beforeWord > 0 && line[beforeWord - 1] == '.') {
+        size_t dotPos = beforeWord - 1;
+        // Extract receiver expression ending at dotPos
+        int parenDepth = 0;
+        int bracketDepth = 0;
+        int angleDepth = 0;
+        size_t i = dotPos;
+        while (i > 0) {
+            char c = line[i - 1];
+            if (c == ')') parenDepth++;
+            else if (c == '(') {
+                if (parenDepth == 0) break;
+                parenDepth--;
+            } else if (c == ']') bracketDepth++;
+            else if (c == '[') {
+                if (bracketDepth == 0) break;
+                bracketDepth--;
+            } else if (c == '>') angleDepth++;
+            else if (c == '<') {
+                if (angleDepth == 0) break;
+                angleDepth--;
+            } else if (parenDepth == 0 && bracketDepth == 0 && angleDepth == 0) {
+                // Expression boundaries
+                if (c == ',' || c == ';' || c == '=' || c == '{' || c == '}' ||
+                    c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
+                    c == '&' || c == '|' || c == '^' || c == '!' || c == '~' ||
+                    c == '?' || c == ':' || c == '\t' || c == ' ' || c == '"' || c == '\'') {
+                    break;
+                }
+            }
+            i--;
+        }
+        std::string receiver = line.substr(i, dotPos - i);
+        while (!receiver.empty() && (receiver.front() == ' ' || receiver.front() == '\t')) receiver.erase(receiver.begin());
+        while (!receiver.empty() && (receiver.back() == ' ' || receiver.back() == '\t')) receiver.pop_back();
 
-    return {receiver, afterDot};
+        return {receiver, filterPrefix};
+    }
+
+    return {"", filterPrefix};
 }
 
 JavaTypeRef CompletionEngine::extractExpectedType(
@@ -158,15 +199,33 @@ CompletionList CompletionEngine::complete(
             }
         }
 
-        // Project classes
-        for (const auto& c : symTab_.getAllClasses()) {
-            if (filterPrefix.empty() || c.name.rfind(filterPrefix, 0) == 0) {
+        // Java keywords
+        static const std::vector<std::string> keywords = {
+            "public", "private", "protected", "static", "final", "abstract", "default",
+            "class", "interface", "enum", "record", "extends", "implements",
+            "void", "return", "if", "else", "for", "while", "do", "switch", "case",
+            "break", "continue", "new", "this", "super", "try", "catch", "finally",
+            "throw", "throws", "import", "package", "synchronized", "instanceof",
+            "int", "long", "boolean", "byte", "short", "char", "double", "float"
+        };
+        for (const auto& kw : keywords) {
+            if (filterPrefix.empty() || kw.rfind(filterPrefix, 0) == 0) {
                 CompletionItem item;
-                item.label = c.name;
-                item.kind = 7; // Class
-                item.detail = c.fqn;
+                item.label = kw;
+                item.kind = 14; // Keyword
+                item.detail = "keyword";
                 list.items.push_back(item);
             }
+        }
+
+        // Project and JDK classes
+        auto matchedClasses = symTab_.findClassesMatchingPrefix(filterPrefix);
+        for (const auto& c : matchedClasses) {
+            CompletionItem item;
+            item.label = c.name;
+            item.kind = 7; // Class
+            item.detail = c.fqn;
+            list.items.push_back(item);
         }
     }
 

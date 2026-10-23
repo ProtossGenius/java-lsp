@@ -40,6 +40,10 @@ set(CORE_SOURCES
     src/semantics/type_checker.cpp
     src/completion/graph_search.cpp
     src/completion/completion_engine.cpp
+    src/project/jar_indexer.cpp
+    src/project/dependency_resolver.cpp
+    src/mybatis/mysql_service.cpp
+    src/mybatis/mybatis_xml.cpp
     src/project/decompilation.cpp
     src/project/project_manager.cpp
 )
@@ -55,6 +59,14 @@ target_link_libraries(java-lsp java_lsp_core ${LLVM_LIBS} tree-sitter dl)
 add_custom_command(TARGET java-lsp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/bin
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:java-lsp> ${CMAKE_CURRENT_SOURCE_DIR}/bin/java-lsp
+)
+
+# Executable ptest
+add_executable(ptest src/tools/ptest.cpp)
+target_link_libraries(ptest java_lsp_core ${LLVM_LIBS} tree-sitter dl)
+add_custom_command(TARGET ptest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/bin
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:ptest> ${CMAKE_CURRENT_SOURCE_DIR}/bin/ptest
 )
 
 # Test executable

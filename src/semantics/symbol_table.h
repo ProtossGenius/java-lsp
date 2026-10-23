@@ -20,6 +20,7 @@ public:
     const JavaClass* resolveClass(const std::string& simpleName, const JavaCompilationUnit& cu) const;
 
     std::vector<JavaClass> getAllClasses() const;
+    std::vector<JavaClass> findClassesMatchingPrefix(const std::string& prefix) const;
     void registerJdkTypes();
 
 private:

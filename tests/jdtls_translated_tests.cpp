@@ -163,3 +163,40 @@ TEST(JdtlsTranslatedTest, DecompilationAndNavigationSources) {
     ASSERT_TRUE(logbackSrc.has_value());
     ASSERT_TRUE(logbackSrc->find("logback-classic") != std::string::npos);
 }
+
+TEST(JdtlsTranslatedTest, InnerClassResolutionAndNoFalsePositive) {
+    auto& symTab = SymbolTable::instance();
+    JavaParser parser;
+    ASSERT_TRUE(parser.init());
+
+    std::string src = R"java(
+package org.ref;
+
+public class Apple {
+    public static <T> AppleBuilder<T> builder() {
+        return new AppleBuilder<T>();
+    }
+
+    public static class AppleBuilder<T> {
+        private String name;
+        public AppleBuilder<T> name(String name) {
+            this.name = name;
+            return this;
+        }
+        public Apple build() {
+            return new Apple();
+        }
+    }
+}
+)java";
+
+    auto cu = parser.parse(src, "Apple.java");
+    ASSERT_TRUE(cu != nullptr);
+
+    // Check inner class resolution
+    const JavaClass* resolved = symTab.resolveClass("AppleBuilder", *cu);
+    ASSERT_TRUE(resolved != nullptr);
+
+    auto diags = TypeChecker::check(*cu, src, TSNode{}, symTab);
+    ASSERT_TRUE(diags.empty());
+}

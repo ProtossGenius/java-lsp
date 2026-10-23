@@ -120,10 +120,17 @@ std::vector<std::string> listFilesRecursively(const std::string& dir, const std:
         if (name == "." || name == "..") continue;
 
         std::string fullPath = dir + "/" + name;
-        if (entry->d_type == DT_DIR) {
+        bool isDir = (entry->d_type == DT_DIR);
+        bool isReg = (entry->d_type == DT_REG);
+        if (entry->d_type == DT_LNK || entry->d_type == DT_UNKNOWN) {
+            isDir = dirExists(fullPath);
+            isReg = !isDir && fileExists(fullPath);
+        }
+
+        if (isDir) {
             auto sub = listFilesRecursively(fullPath, ext);
             results.insert(results.end(), sub.begin(), sub.end());
-        } else if (entry->d_type == DT_REG) {
+        } else if (isReg) {
             if (ext.empty() || (fullPath.length() >= ext.length() &&
                 fullPath.compare(fullPath.length() - ext.length(), ext.length(), ext) == 0)) {
                 results.push_back(fullPath);
