@@ -1,0 +1,11 @@
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.o
+*.a
+*.dylib
+*.dSYM
+.cache/
+compile_commands.json
+.DS_Store

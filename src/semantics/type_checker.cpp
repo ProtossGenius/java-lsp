@@ -1,0 +1,196 @@
+#include "semantics/type_checker.h"
+#include "parser/tree_sitter_loader.h"
+#include "utils/logger.h"
+
+namespace javalsp {
+
+std::string TypeChecker::getNodeText(TSNode node, const std::string& src) {
+    if (ts_node_is_null(node)) return "";
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    if (start >= src.size() || end > src.size() || start >= end) return "";
+    return src.substr(start, end - start);
+}
+
+Range TypeChecker::getNodeRange(TSNode node) {
+    if (ts_node_is_null(node)) return Range{{0, 0}, {0, 0}};
+    TSPoint s = ts_node_start_point(node);
+    TSPoint e = ts_node_end_point(node);
+    return Range{
+        {static_cast<int>(s.row), static_cast<int>(s.column)},
+        {static_cast<int>(e.row), static_cast<int>(e.column)}
+    };
+}
+
+JavaTypeRef TypeChecker::resolveExpressionType(
+    const std::string& expr,
+    std::shared_ptr<Scope> scope,
+    const JavaCompilationUnit& cu,
+    const SymbolTable& symTab) {
+
+    if (expr.empty()) return JavaTypeRef{};
+
+    // Handle chained expression: receiver.method(...) or receiver.field
+    size_t lastDot = expr.find_last_of('.');
+    if (lastDot != std::string::npos) {
+        std::string base = expr.substr(0, lastDot);
+        std::string member = expr.substr(lastDot + 1);
+
+        // Strip method call parens if any: e.g. listUsers() -> listUsers
+        bool isCall = false;
+        if (!member.empty() && member.back() == ')') {
+            isCall = true;
+            size_t paren = member.find('(');
+            if (paren != std::string::npos) {
+                member = member.substr(0, paren);
+            }
+        }
+
+        JavaTypeRef baseType = resolveExpressionType(base, scope, cu, symTab);
+        if (baseType.name.empty()) {
+            // Check if base is a class name: e.g. List
+            const JavaClass* baseCls = symTab.resolveClass(base, cu);
+            if (baseCls) {
+                baseType.name = baseCls->name;
+                baseType.fqn = baseCls->fqn;
+            }
+        }
+
+        const JavaClass* cls = symTab.resolveClass(baseType.name, cu);
+        if (!cls && !baseType.fqn.empty()) {
+            cls = symTab.findClassByFqn(baseType.fqn);
+        }
+
+        if (cls) {
+            for (const auto& m : cls->methods) {
+                if (m.name == member) {
+                    JavaTypeRef ret = m.returnType;
+                    // Generic substitution
+                    if (!baseType.typeArguments.empty()) {
+                        if (ret.name == "E" || ret.name == "T") {
+                            return baseType.typeArguments[0];
+                        }
+                        if (ret.name == "Stream" || ret.name == "List") {
+                            if (!ret.typeArguments.empty() && (ret.typeArguments[0].name == "E" || ret.typeArguments[0].name == "T")) {
+                                ret.typeArguments[0] = baseType.typeArguments[0];
+                            }
+                        }
+                    }
+                    return ret;
+                }
+            }
+            for (const auto& f : cls->fields) {
+                if (f.name == member) {
+                    return f.type;
+                }
+            }
+        }
+    }
+
+    // Simple identifier lookup
+    if (scope) {
+        auto var = scope->lookupVariable(expr);
+        if (var) return var->type;
+        LOG_INFO("resolveExpressionType: lookupVariable('" + expr + "') failed in scope (vars: " + std::to_string(scope->localVariables().size()) + ")");
+    } else {
+        LOG_INFO("resolveExpressionType: scope is null!");
+    }
+
+    // Check class in compilation unit
+    for (const auto& cls : cu.classes) {
+        for (const auto& f : cls.fields) {
+            if (f.name == expr) return f.type;
+        }
+    }
+
+    // Check classes in symbol table
+    for (const auto& cls : symTab.getAllClasses()) {
+        if (!cu.packageName.empty() && cls.packageName == cu.packageName) {
+            for (const auto& f : cls.fields) {
+                if (f.name == expr) return f.type;
+            }
+        }
+    }
+
+    // Check if it's a known class name
+    const JavaClass* resolvedCls = symTab.resolveClass(expr, cu);
+    if (resolvedCls) {
+        return JavaTypeRef{resolvedCls->name, resolvedCls->fqn};
+    }
+
+    return JavaTypeRef{};
+}
+
+std::vector<Diagnostic> TypeChecker::check(
+    const JavaCompilationUnit& cu,
+    const std::string& src,
+    TSNode rootNode,
+    const SymbolTable& symTab) {
+
+    std::vector<Diagnostic> diags;
+    auto rootScope = std::make_shared<Scope>(ScopeKind::FILE);
+
+    if (ts_node_is_null(rootNode)) {
+        TSParser* parser = TreeSitterLoader::instance().newParser();
+        if (parser) {
+            TSTree* tree = ts_parser_parse_string(parser, nullptr, src.c_str(), src.size());
+            if (tree) {
+                TSNode r = ts_tree_root_node(tree);
+                collectDiagnostics(r, src, cu, symTab, rootScope, diags);
+                ts_tree_delete(tree);
+            }
+            ts_parser_delete(parser);
+        }
+    } else {
+        collectDiagnostics(rootNode, src, cu, symTab, rootScope, diags);
+    }
+
+    return diags;
+}
+
+void TypeChecker::collectDiagnostics(
+    TSNode node,
+    const std::string& src,
+    const JavaCompilationUnit& cu,
+    const SymbolTable& symTab,
+    std::shared_ptr<Scope> currentScope,
+    std::vector<Diagnostic>& diags) {
+
+    if (ts_node_is_null(node)) return;
+
+    std::string type = ts_node_type(node);
+
+    // Check for unresolved type_identifier
+    if (type == "type_identifier") {
+        std::string typeName = getNodeText(node, src);
+        // Exclude primitive wrappers or standard generics if recognized
+        if (typeName != "void" && typeName != "var" && typeName != "T" && typeName != "E" && typeName != "R" && typeName != "K" && typeName != "V") {
+            const JavaClass* resolved = symTab.resolveClass(typeName, cu);
+            if (!resolved) {
+                // Check if defined in current compilation unit
+                bool foundLocal = false;
+                for (const auto& c : cu.classes) {
+                    if (c.name == typeName) {
+                        foundLocal = true;
+                        break;
+                    }
+                }
+                if (!foundLocal) {
+                    Diagnostic d;
+                    d.range = getNodeRange(node);
+                    d.severity = 1; // Error
+                    d.source = "java-lsp";
+                    d.message = typeName + " cannot be resolved to a type";
+                    diags.push_back(d);
+                }
+            }
+        }
+    }
+
+    uint32_t count = ts_node_child_count(node);
+    for (uint32_t i = 0; i < count; ++i) {
+        collectDiagnostics(ts_node_child(node, i), src, cu, symTab, currentScope, diags);
+    }
+}
+
+} // namespace javalsp
