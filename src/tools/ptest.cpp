@@ -369,8 +369,18 @@ static PTestResult testJavaFile(
         res.javacErrors = static_cast<int>(it->second.size());
         res.javacErrorMsgs = it->second;
     } else if (res.lspErrors > 0) {
-        // If LSP reported errors and no project-wide compiler errors recorded, verify with javac directly
-        std::string cmd = "javac -proc:none \"" + filePath + "\" 2>&1";
+        // If LSP reported errors and no project-wide compiler errors recorded, verify with javac directly using indexed classpath
+        std::string cpStr = "";
+        for (const auto& jar : DependencyResolver::instance().getDiscoveredJars()) {
+            if (!cpStr.empty()) cpStr += ":";
+            cpStr += jar;
+        }
+        std::string cmd;
+        if (!cpStr.empty()) {
+            cmd = "javac -proc:none -cp \"" + cpStr + "\" \"" + filePath + "\" 2>&1";
+        } else {
+            cmd = "javac -proc:none \"" + filePath + "\" 2>&1";
+        }
         std::array<char, 256> buffer;
         std::string result;
         std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);

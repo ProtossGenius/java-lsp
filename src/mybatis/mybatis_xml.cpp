@@ -226,7 +226,7 @@ std::vector<Location> MyBatisXmlService::findDefinitions(
         const MyBatisMapper* mapper = findMapperForJavaUri(uri);
         if (!mapper) {
             // Try by class fqn in compilation unit
-            for (const auto& cls : symTab.getAllClasses()) {
+            for (const auto& [fqn, cls] : symTab.getAllClasses()) {
                 mapper = findMapperByNamespace(cls.fqn);
                 if (mapper) break;
             }

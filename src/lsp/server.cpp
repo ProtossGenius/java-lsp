@@ -597,7 +597,7 @@ void Server::handleTextDocumentHover(const llvm::json::Value& id, const llvm::js
     }
 
     if (!matchedMethod) {
-        for (const auto& cls : symTab_.getAllClasses()) {
+        for (const auto& [fqn, cls] : symTab_.getAllClasses()) {
             for (const auto& m : cls.methods) {
                 if (m.name == symbol) {
                     if (!matchedMethod || matchedMethod->docComment.empty()) {

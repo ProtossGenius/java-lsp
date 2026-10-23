@@ -246,7 +246,11 @@ void JavaParser::parseClass(TSNode node, const std::string& src, JavaCompilation
     }
 
     cls.packageName = cu.packageName;
-    cls.fqn = cls.packageName.empty() ? cls.name : (cls.packageName + "." + cls.name);
+    if (parentClass) {
+        cls.fqn = parentClass->fqn + "." + cls.name;
+    } else {
+        cls.fqn = cls.packageName.empty() ? cls.name : (cls.packageName + "." + cls.name);
+    }
 
     if (!ts_node_is_null(bodyNode)) {
         for (uint32_t i = 0; i < ts_node_child_count(bodyNode); ++i) {

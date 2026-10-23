@@ -19,7 +19,8 @@ public:
     const JavaClass* findClassByName(const std::string& simpleName) const;
     const JavaClass* resolveClass(const std::string& simpleName, const JavaCompilationUnit& cu) const;
 
-    std::vector<JavaClass> getAllClasses() const;
+    const std::unordered_map<std::string, JavaClass>& getAllClasses() const;
+    std::vector<const JavaClass*> getClassesInPackage(const std::string& packageName) const;
     std::vector<JavaClass> findClassesMatchingPrefix(const std::string& prefix) const;
     void registerJdkTypes();
 
@@ -27,6 +28,7 @@ private:
     SymbolTable();
     std::unordered_map<std::string, JavaClass> classesByFqn_;
     std::unordered_map<std::string, std::vector<std::string>> fqnsByName_;
+    std::unordered_map<std::string, std::vector<const JavaClass*>> classesByPackage_;
 };
 
 } // namespace javalsp

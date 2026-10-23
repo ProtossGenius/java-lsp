@@ -65,10 +65,39 @@ void DependencyResolver::resolveAll(const std::string& workspaceRoot, SymbolTabl
         jdkResolved_ = true;
     }
 
+    resolveM2Repository(symTab);
+
     if (!workspaceRoot.empty()) {
         resolveClasspathFiles(workspaceRoot, symTab);
         resolveMaven(workspaceRoot, symTab);
         resolveGradle(workspaceRoot, symTab);
+    }
+}
+
+void DependencyResolver::resolveM2Repository(SymbolTable& symTab) {
+    const char* home = std::getenv("HOME");
+    if (!home) return;
+    std::string m2 = std::string(home) + "/.m2/repository";
+    if (!fs::dirExists(m2)) return;
+
+    // Check p2 OSGi bundles if present (for Eclipse Tycho projects like jdtls / jdt.core)
+    std::string p2BundleDir = m2 + "/p2/osgi/bundle";
+    if (fs::dirExists(p2BundleDir)) {
+        auto jars = fs::listFilesRecursively(p2BundleDir, ".jar");
+        for (const auto& j : jars) {
+            if (j.find(".source") == std::string::npos && j.find("-sources") == std::string::npos) {
+                indexJar(j, symTab);
+            }
+        }
+    }
+
+    // Check JUnit 4 jar
+    std::string junit4 = m2 + "/junit/junit/4.13.1/junit-4.13.1.jar";
+    if (fs::fileExists(junit4)) {
+        indexJar(junit4, symTab);
+    } else {
+        std::string junit4_12 = m2 + "/junit/junit/4.12/junit-4.12.jar";
+        if (fs::fileExists(junit4_12)) indexJar(junit4_12, symTab);
     }
 }
 

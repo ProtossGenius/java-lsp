@@ -24,6 +24,7 @@ private:
     void resolveMaven(const std::string& rootPath, SymbolTable& symTab);
     void resolveGradle(const std::string& rootPath, SymbolTable& symTab);
     void resolveClasspathFiles(const std::string& rootPath, SymbolTable& symTab);
+    void resolveM2Repository(SymbolTable& symTab);
     void indexJar(const std::string& jarPath, SymbolTable& symTab);
 
     std::string findJavaHome();

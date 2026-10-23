@@ -16,7 +16,17 @@ SymbolTable::SymbolTable() {
 void SymbolTable::clear() {
     classesByFqn_.clear();
     fqnsByName_.clear();
+    classesByPackage_.clear();
     registerJdkTypes();
+}
+
+static const JavaClass* findInClassHierarchy(const JavaClass& cls, const std::string& targetName) {
+    if (cls.name == targetName) return &cls;
+    for (const auto& inner : cls.innerClasses) {
+        auto found = findInClassHierarchy(inner, targetName);
+        if (found) return found;
+    }
+    return nullptr;
 }
 
 void SymbolTable::addClass(const JavaClass& cls) {
@@ -34,6 +44,10 @@ void SymbolTable::addClass(const JavaClass& cls) {
     }
 
     classesByFqn_[fqn] = cls;
+    const JavaClass* storedCls = &classesByFqn_[fqn];
+    if (!storedCls->packageName.empty()) {
+        classesByPackage_[storedCls->packageName].push_back(storedCls);
+    }
     auto& list = fqnsByName_[cls.name];
     bool exists = false;
     for (const auto& existing : list) {
@@ -44,6 +58,11 @@ void SymbolTable::addClass(const JavaClass& cls) {
     }
     if (!exists) {
         list.push_back(fqn);
+    }
+
+    // Recursively register inner classes
+    for (const auto& inner : cls.innerClasses) {
+        addClass(inner);
     }
 }
 
@@ -62,6 +81,12 @@ const JavaClass* SymbolTable::findClassByName(const std::string& simpleName) con
 }
 
 const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const JavaCompilationUnit& cu) const {
+    // 0. Search compilation unit classes and inner classes
+    for (const auto& cls : cu.classes) {
+        auto found = findInClassHierarchy(cls, simpleName);
+        if (found) return found;
+    }
+
     // 1. Fully qualified already?
     if (simpleName.find('.') != std::string::npos) {
         return findClassByFqn(simpleName);
@@ -107,13 +132,16 @@ const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const 
     return findClassByName(simpleName);
 }
 
-std::vector<JavaClass> SymbolTable::getAllClasses() const {
-    std::vector<JavaClass> result;
-    result.reserve(classesByFqn_.size());
-    for (const auto& pair : classesByFqn_) {
-        result.push_back(pair.second);
+const std::unordered_map<std::string, JavaClass>& SymbolTable::getAllClasses() const {
+    return classesByFqn_;
+}
+
+std::vector<const JavaClass*> SymbolTable::getClassesInPackage(const std::string& packageName) const {
+    auto it = classesByPackage_.find(packageName);
+    if (it != classesByPackage_.end()) {
+        return it->second;
     }
-    return result;
+    return {};
 }
 
 std::vector<JavaClass> SymbolTable::findClassesMatchingPrefix(const std::string& prefix) const {

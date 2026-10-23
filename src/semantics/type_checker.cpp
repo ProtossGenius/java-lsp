@@ -104,9 +104,9 @@ JavaTypeRef TypeChecker::resolveExpressionType(
     }
 
     // Check classes in symbol table
-    for (const auto& cls : symTab.getAllClasses()) {
-        if (!cu.packageName.empty() && cls.packageName == cu.packageName) {
-            for (const auto& f : cls.fields) {
+    if (!cu.packageName.empty()) {
+        for (const auto* cls : symTab.getClassesInPackage(cu.packageName)) {
+            for (const auto& f : cls->fields) {
                 if (f.name == expr) return f.type;
             }
         }
@@ -175,6 +175,46 @@ static bool isTypeDeclarationOrImport(TSNode node) {
     return false;
 }
 
+static bool isDeclaredTypeParameter(TSNode node, const std::string& typeName, const std::string& src) {
+    TSNode cur = node;
+    while (!ts_node_is_null(cur)) {
+        TSNode params = ts_node_child_by_field_name(cur, "type_parameters", 15);
+        if (!ts_node_is_null(params)) {
+            for (uint32_t i = 0; i < ts_node_child_count(params); ++i) {
+                TSNode p = ts_node_child(params, i);
+                if (std::string(ts_node_type(p)) == "type_parameter") {
+                    TSNode nameNode = ts_node_child_by_field_name(p, "name", 4);
+                    if (ts_node_is_null(nameNode)) {
+                        for (uint32_t j = 0; j < ts_node_child_count(p); ++j) {
+                            if (std::string(ts_node_type(ts_node_child(p, j))) == "type_identifier") {
+                                nameNode = ts_node_child(p, j);
+                                break;
+                            }
+                        }
+                    }
+                    if (!ts_node_is_null(nameNode)) {
+                        uint32_t s = ts_node_start_byte(nameNode);
+                        uint32_t e = ts_node_end_byte(nameNode);
+                        if (s < src.size() && e <= src.size() && src.substr(s, e - s) == typeName) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        cur = ts_node_parent(cur);
+    }
+    return false;
+}
+
+static bool findTypeInClassHierarchy(const JavaClass& cls, const std::string& typeName) {
+    if (cls.name == typeName) return true;
+    for (const auto& inner : cls.innerClasses) {
+        if (findTypeInClassHierarchy(inner, typeName)) return true;
+    }
+    return false;
+}
+
 void TypeChecker::collectDiagnostics(
     TSNode node,
     const std::string& src,
@@ -195,22 +235,24 @@ void TypeChecker::collectDiagnostics(
             if (typeName != "void" && typeName != "var" &&
                 !(typeName.size() <= 2 && std::isupper(typeName[0]))) {
 
-                const JavaClass* resolved = symTab.resolveClass(typeName, cu);
-                if (!resolved) {
-                    bool foundLocal = false;
-                    for (const auto& c : cu.classes) {
-                        if (c.name == typeName) {
-                            foundLocal = true;
-                            break;
+                if (!isDeclaredTypeParameter(node, typeName, src)) {
+                    const JavaClass* resolved = symTab.resolveClass(typeName, cu);
+                    if (!resolved) {
+                        bool foundLocal = false;
+                        for (const auto& c : cu.classes) {
+                            if (findTypeInClassHierarchy(c, typeName)) {
+                                foundLocal = true;
+                                break;
+                            }
                         }
-                    }
-                    if (!foundLocal) {
-                        Diagnostic d;
-                        d.range = getNodeRange(node);
-                        d.severity = 1; // Error
-                        d.source = "java-lsp";
-                        d.message = typeName + " cannot be resolved to a type";
-                        diags.push_back(d);
+                        if (!foundLocal) {
+                            Diagnostic d;
+                            d.range = getNodeRange(node);
+                            d.severity = 1; // Error
+                            d.source = "java-lsp";
+                            d.message = typeName + " cannot be resolved to a type";
+                            diags.push_back(d);
+                        }
                     }
                 }
             }

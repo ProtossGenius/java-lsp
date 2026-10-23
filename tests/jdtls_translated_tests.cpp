@@ -200,3 +200,28 @@ public class Apple {
     auto diags = TypeChecker::check(*cu, src, TSNode{}, symTab);
     ASSERT_TRUE(diags.empty());
 }
+
+TEST(JdtlsTranslatedTest, ScopedTypeIdentifierPackagePrefixResolution) {
+    auto& symTab = SymbolTable::instance();
+    JavaParser parser;
+    ASSERT_TRUE(parser.init());
+
+    std::string src = R"java(
+package org.sample;
+
+public class ScopedTypeProbe {
+    public void run() {
+        java.util.StringTokenizer tokenizer = null;
+    }
+}
+)java";
+
+    auto cu = parser.parse(src, "ScopedTypeProbe.java");
+    ASSERT_TRUE(cu != nullptr);
+
+    auto diags = TypeChecker::check(*cu, src, TSNode{}, symTab);
+    for (const auto& d : diags) {
+        std::cerr << "Diagnostic: " << d.message << " at line " << d.range.start.line << std::endl;
+    }
+    ASSERT_TRUE(diags.empty());
+}

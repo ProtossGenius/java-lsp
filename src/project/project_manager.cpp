@@ -54,6 +54,35 @@ void ProjectManager::indexWorkspace() {
     DependencyResolver::instance().resolveAll(rootPath_, symTab_);
 }
 
+static void registerClassAndInners(JavaClass& cls, const std::string& path, SymbolTable& symTab, std::shared_ptr<Scope> parentScope) {
+    cls.filePath = path;
+    LombokHandler::processClass(cls);
+    symTab.addClass(cls);
+
+    auto classScope = Scope::create(ScopeKind::CLASS, parentScope, cls.range);
+    for (const auto& f : cls.fields) {
+        JavaVariable var;
+        var.name = f.name;
+        var.type = f.type;
+        var.range = f.range;
+        var.nameRange = f.nameRange;
+        classScope->addVariable(var);
+    }
+    for (const auto& m : cls.methods) {
+        auto methodScope = Scope::create(ScopeKind::METHOD, classScope, m.range);
+        for (const auto& p : m.parameters) {
+            JavaVariable pvar;
+            pvar.name = p.second;
+            pvar.type = p.first;
+            pvar.range = m.range;
+            methodScope->addVariable(pvar);
+        }
+    }
+    for (auto& inner : cls.innerClasses) {
+        registerClassAndInners(inner, path, symTab, classScope);
+    }
+}
+
 void ProjectManager::indexJavaFile(const std::string& path) {
     std::string content = fs::readFile(path);
     if (content.empty()) return;
@@ -61,40 +90,14 @@ void ProjectManager::indexJavaFile(const std::string& path) {
     auto cu = parser_.parse(content, path);
     if (!cu) return;
 
-    // Process Lombok for each class
-    for (auto& cls : cu->classes) {
-        cls.filePath = path;
-        LombokHandler::processClass(cls);
-        symTab_.addClass(cls);
-    }
-
     std::string uri = fs::pathToUri(path);
     fileCUs_[uri] = cu;
     fileBuffers_[uri] = content;
 
-    // Build scopes
+    // Build scopes and register classes with inner classes
     auto fileScope = Scope::create(ScopeKind::FILE);
-    for (const auto& cls : cu->classes) {
-        auto classScope = Scope::create(ScopeKind::CLASS, fileScope, cls.range);
-        for (const auto& f : cls.fields) {
-            JavaVariable var;
-            var.name = f.name;
-            var.type = f.type;
-            var.range = f.range;
-            var.nameRange = f.nameRange;
-            classScope->addVariable(var);
-        }
-
-        for (const auto& m : cls.methods) {
-            auto methodScope = Scope::create(ScopeKind::METHOD, classScope, m.range);
-            for (const auto& p : m.parameters) {
-                JavaVariable pvar;
-                pvar.name = p.second;
-                pvar.type = p.first;
-                pvar.range = m.range;
-                methodScope->addVariable(pvar);
-            }
-        }
+    for (auto& cls : cu->classes) {
+        registerClassAndInners(cls, path, symTab_, fileScope);
     }
     fileScopes_[uri] = fileScope;
 }
@@ -137,36 +140,12 @@ void ProjectManager::updateFile(const std::string& uri, const std::string& newCo
         if (cu->imports.empty()) cu->imports = oldIt->second->imports;
     }
 
-    for (auto& cls : cu->classes) {
-        cls.filePath = path;
-        LombokHandler::processClass(cls);
-        symTab_.addClass(cls);
-    }
     fileCUs_[uri] = cu;
 
-    // Rebuild scope hierarchy
+    // Rebuild scope hierarchy and register classes with inner classes
     auto fileScope = Scope::create(ScopeKind::FILE);
-    for (const auto& cls : cu->classes) {
-        auto classScope = Scope::create(ScopeKind::CLASS, fileScope, cls.range);
-        for (const auto& f : cls.fields) {
-            JavaVariable var;
-            var.name = f.name;
-            var.type = f.type;
-            var.range = f.range;
-            var.nameRange = f.nameRange;
-            classScope->addVariable(var);
-        }
-
-        for (const auto& m : cls.methods) {
-            auto methodScope = Scope::create(ScopeKind::METHOD, classScope, m.range);
-            for (const auto& p : m.parameters) {
-                JavaVariable pvar;
-                pvar.name = p.second;
-                pvar.type = p.first;
-                pvar.range = m.range;
-                methodScope->addVariable(pvar);
-            }
-        }
+    for (auto& cls : cu->classes) {
+        registerClassAndInners(cls, path, symTab_, fileScope);
     }
     fileScopes_[uri] = fileScope;
 }
