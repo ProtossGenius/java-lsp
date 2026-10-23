@@ -13,9 +13,10 @@
 namespace javalsp {
 
 static std::string execCommand(const std::string& cmd) {
+    std::string fullCmd = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\" && " + cmd;
     std::array<char, 256> buffer;
     std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(fullCmd.c_str(), "r"), pclose);
     if (!pipe) return "";
     while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
         result += buffer.data();
@@ -181,10 +182,9 @@ void DependencyResolver::resolveMaven(const std::string& rootPath, SymbolTable& 
         size_t lastSlash = pom.find_last_of('/');
         std::string dir = (lastSlash != std::string::npos) ? pom.substr(0, lastSlash) : rootPath;
 
-        // Skip test fixture directories to avoid launching dozens of mock maven processes
-        if (dir.find("/test") != std::string::npos ||
-            dir.find("/projects/") != std::string::npos ||
-            dir.find("/fixtures/") != std::string::npos ||
+        // Skip test fixture directories inside test resources to avoid launching dozens of mock maven processes
+        if (dir.find("/src/test/resources/") != std::string::npos ||
+            dir.find("/test-fixtures/") != std::string::npos ||
             dir.find("/testresources/") != std::string::npos) {
             continue;
         }

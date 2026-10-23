@@ -29,6 +29,7 @@ private:
     std::unordered_map<std::string, JavaClass> classesByFqn_;
     std::unordered_map<std::string, std::vector<std::string>> fqnsByName_;
     std::unordered_map<std::string, std::vector<const JavaClass*>> classesByPackage_;
+    std::unordered_map<std::string, std::string> normalizedToActualFqn_;
 };
 
 } // namespace javalsp

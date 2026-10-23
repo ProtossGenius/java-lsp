@@ -78,6 +78,8 @@ add_executable(java-lsp-tests
     tests/test_nested_lambda.cpp
     tests/test_chained_completion.cpp
     tests/jdtls_translated_tests.cpp
+    tests/test_lsp_server.cpp
+    tests/test_integration_workflow.cpp
 )
 target_link_libraries(java-lsp-tests java_lsp_core ${LLVM_LIBS} tree-sitter dl)
 

@@ -23,6 +23,7 @@ public:
     void handleShutdown(const llvm::json::Value& id);
     void handleTextDocumentDidOpen(const llvm::json::Value& params);
     void handleTextDocumentDidChange(const llvm::json::Value& params);
+    void handleTextDocumentDidClose(const llvm::json::Value& params);
     void handleTextDocumentCompletion(const llvm::json::Value& id, const llvm::json::Value& params);
     void handleTextDocumentDefinition(const llvm::json::Value& id, const llvm::json::Value& params);
     void handleTextDocumentDeclaration(const llvm::json::Value& id, const llvm::json::Value& params);
@@ -32,10 +33,14 @@ public:
     void handleTextDocumentDocumentSymbol(const llvm::json::Value& id, const llvm::json::Value& params);
     void handleTextDocumentSignatureHelp(const llvm::json::Value& id, const llvm::json::Value& params);
     void handleTextDocumentReferences(const llvm::json::Value& id, const llvm::json::Value& params);
+    void handleTextDocumentPrepareRename(const llvm::json::Value& id, const llvm::json::Value& params);
     void handleTextDocumentRename(const llvm::json::Value& id, const llvm::json::Value& params);
+    void handleTextDocumentFormatting(const llvm::json::Value& id, const llvm::json::Value& params);
+    void handleTextDocumentCodeAction(const llvm::json::Value& id, const llvm::json::Value& params);
     void handleWorkspaceDidRenameFiles(const llvm::json::Value& params);
     void handleJavaOverridableMethods(const llvm::json::Value& id, const llvm::json::Value& params);
     void handleJavaOverrideMethods(const llvm::json::Value& id, const llvm::json::Value& params);
+    void handleJavaGetRefactorEdit(const llvm::json::Value& id, const llvm::json::Value& params);
 
     void publishDiagnostics(const std::string& uri);
 

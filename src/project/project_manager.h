@@ -22,6 +22,8 @@ public:
     std::shared_ptr<JavaCompilationUnit> getCompilationUnit(const std::string& uri);
     void updateFile(const std::string& uri, const std::string& newContent);
     void closeFile(const std::string& uri);
+    void removeFile(const std::string& uri);
+    void renameFile(const std::string& oldUri, const std::string& newUri);
 
     std::string getFileContent(const std::string& uri);
     std::shared_ptr<Scope> getFileScope(const std::string& uri);

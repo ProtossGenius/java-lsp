@@ -209,9 +209,17 @@ static bool isDeclaredTypeParameter(TSNode node, const std::string& typeName, co
 
 static bool findTypeInClassHierarchy(const JavaClass& cls, const std::string& typeName) {
     if (cls.name == typeName || cls.fqn == typeName) return true;
-    if (cls.fqn.size() > typeName.size() &&
-        cls.fqn.compare(cls.fqn.size() - typeName.size(), typeName.size(), typeName) == 0 &&
-        cls.fqn[cls.fqn.size() - typeName.size() - 1] == '.') {
+
+    std::string normFqn = cls.fqn;
+    std::replace(normFqn.begin(), normFqn.end(), '$', '.');
+    std::string normType = typeName;
+    std::replace(normType.begin(), normType.end(), '$', '.');
+
+    if (normFqn == normType || cls.name == normType) return true;
+
+    if (normFqn.size() > normType.size() &&
+        normFqn.compare(normFqn.size() - normType.size(), normType.size(), normType) == 0 &&
+        normFqn[normFqn.size() - normType.size() - 1] == '.') {
         return true;
     }
     for (const auto& inner : cls.innerClasses) {
@@ -249,6 +257,34 @@ void TypeChecker::collectDiagnostics(
     if (ts_node_is_null(node)) return;
 
     std::string type = ts_node_type(node);
+
+    // Check for unresolved annotation types
+    if (type == "annotation" || type == "marker_annotation") {
+        TSNode nameNode = ts_node_child_by_field_name(node, "name", 4);
+        if (!ts_node_is_null(nameNode)) {
+            std::string annotType = getNodeText(nameNode, src);
+            if (!annotType.empty() && annotType != "SuppressWarnings") {
+                const JavaClass* resolved = symTab.resolveClass(annotType, cu);
+                if (!resolved) {
+                    bool foundLocal = false;
+                    for (const auto& c : cu.classes) {
+                        if (findTypeInClassHierarchy(c, annotType)) {
+                            foundLocal = true;
+                            break;
+                        }
+                    }
+                    if (!foundLocal) {
+                        Diagnostic d;
+                        d.range = getNodeRange(nameNode);
+                        d.severity = 1; // Error
+                        d.source = "java-lsp";
+                        d.message = annotType + " cannot be resolved to a type";
+                        diags.push_back(d);
+                    }
+                }
+            }
+        }
+    }
 
     // Check for unresolved scoped_type_identifier (e.g. java.util.StringTokenizer or Outer.Inner)
     if (type == "scoped_type_identifier") {

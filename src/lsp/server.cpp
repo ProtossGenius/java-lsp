@@ -7,8 +7,23 @@
 #include "utils/logger.h"
 #include <tree_sitter/api.h>
 #include <sstream>
+#include <fstream>
+#include <unordered_set>
 
 namespace javalsp {
+
+static bool isPrimitiveOrKeyword(const std::string& symbol) {
+    static const std::unordered_set<std::string> keywords = {
+        "int", "void", "boolean", "byte", "char", "short", "long", "float", "double",
+        "var", "val", "null", "true", "false", "this", "super", "return", "if", "else",
+        "for", "while", "do", "switch", "case", "default", "break", "continue", "throw",
+        "throws", "try", "catch", "finally", "class", "interface", "enum", "record",
+        "extends", "implements", "public", "protected", "private", "static", "final",
+        "abstract", "synchronized", "volatile", "transient", "native", "package", "import",
+        "new", "instanceof"
+    };
+    return keywords.count(symbol) > 0;
+}
 
 Server::Server(Transport& transport)
     : transport_(transport),
@@ -61,6 +76,8 @@ void Server::handleMessage(const llvm::json::Value& msg) {
         handleTextDocumentDidOpen(params);
     } else if (method == "textDocument/didChange") {
         handleTextDocumentDidChange(params);
+    } else if (method == "textDocument/didClose") {
+        handleTextDocumentDidClose(params);
     } else if (method == "textDocument/completion" && idVal) {
         handleTextDocumentCompletion(*idVal, params);
     } else if (method == "textDocument/definition" && idVal) {
@@ -79,14 +96,22 @@ void Server::handleMessage(const llvm::json::Value& msg) {
         handleTextDocumentSignatureHelp(*idVal, params);
     } else if (method == "textDocument/references" && idVal) {
         handleTextDocumentReferences(*idVal, params);
+    } else if (method == "textDocument/prepareRename" && idVal) {
+        handleTextDocumentPrepareRename(*idVal, params);
     } else if (method == "textDocument/rename" && idVal) {
         handleTextDocumentRename(*idVal, params);
+    } else if (method == "textDocument/formatting" && idVal) {
+        handleTextDocumentFormatting(*idVal, params);
+    } else if (method == "textDocument/codeAction" && idVal) {
+        handleTextDocumentCodeAction(*idVal, params);
     } else if (method == "workspace/didRenameFiles") {
         handleWorkspaceDidRenameFiles(params);
     } else if (method == "java/overridableMethods" && idVal) {
         handleJavaOverridableMethods(*idVal, params);
     } else if (method == "java/overrideMethods" && idVal) {
         handleJavaOverrideMethods(*idVal, params);
+    } else if (method == "java/getRefactorEdit" && idVal) {
+        handleJavaGetRefactorEdit(*idVal, params);
     } else if (idVal) {
         // Unknown request -> return empty result or null
         transport_.writeResponse(*idVal, nullptr);
@@ -144,7 +169,10 @@ void Server::handleInitialize(const llvm::json::Value& id, const llvm::json::Val
             {"triggerCharacters", llvm::json::Array{"(", ","}}
         }},
         {"referencesProvider", true},
-        {"renameProvider", true},
+        {"renameProvider", llvm::json::Object{
+            {"prepareProvider", true}
+        }},
+        {"documentFormattingProvider", true},
         {"codeActionProvider", true}
     };
 
@@ -192,7 +220,26 @@ void Server::handleTextDocumentDidChange(const llvm::json::Value& params) {
     publishDiagnostics(uri->str());
 }
 
+void Server::handleTextDocumentDidClose(const llvm::json::Value& params) {
+    auto obj = params.getAsObject();
+    if (!obj) return;
+    auto td = obj->getObject("textDocument");
+    if (!td) return;
+    auto uri = td->getString("uri");
+    if (!uri) return;
+    pm_.closeFile(uri->str());
+}
+
 void Server::publishDiagnostics(const std::string& uri) {
+    if (uri.size() >= 4 && uri.substr(uri.size() - 4) == ".xml") {
+        llvm::json::Object p{
+            {"uri", uri},
+            {"diagnostics", llvm::json::Array{}}
+        };
+        transport_.writeNotification("textDocument/publishDiagnostics", llvm::json::Value(std::move(p)));
+        return;
+    }
+
     auto cu = pm_.getCompilationUnit(uri);
     if (!cu) return;
 
@@ -312,6 +359,10 @@ void Server::handleTextDocumentDefinition(const llvm::json::Value& id, const llv
         if (!std::getline(stream, line)) { line = ""; break; }
     }
     std::string symbol = extractSymbolAtPosition(line, pos.character);
+    if (symbol.empty() || isPrimitiveOrKeyword(symbol)) {
+        transport_.writeResponse(id, llvm::json::Array{});
+        return;
+    }
 
     // 1. Look in innermost scope (local variables, lambda parameters)
     auto scope = pm_.getFileScope(uri->str());
@@ -351,12 +402,41 @@ void Server::handleTextDocumentDefinition(const llvm::json::Value& id, const llv
         }
     }
 
-    // 3. Class by name
+    // 3. Class by name or member from third-party dependency
     const JavaClass* cls = symTab_.resolveClass(symbol, *cu);
     std::string fqnToLookup = cls ? cls->fqn : symbol;
-    auto decompiled = DecompilationService::instance().resolveSourceForFqn(fqnToLookup);
+    auto decompiled = DecompilationService::instance().resolveSourceForFqn(fqnToLookup, &symTab_);
+    if (!decompiled) {
+        // Check if symbol is a method or field on a receiver object
+        std::string expr = extractFullExpressionAtPosition(line, pos.character);
+        if (!expr.empty()) {
+            auto inner = scope ? scope->findInnermostScope(pos) : scope;
+            JavaTypeRef tr = TypeChecker::resolveExpressionType(expr, inner, *cu, symTab_);
+            if (!tr.name.empty() && !isPrimitiveOrKeyword(tr.name)) {
+                const JavaClass* rCls = symTab_.resolveClass(tr.name, *cu);
+                std::string rFqn = rCls ? rCls->fqn : tr.fqn.empty() ? tr.name : tr.fqn;
+                decompiled = DecompilationService::instance().resolveSourceForFqn(rFqn, &symTab_);
+            }
+        }
+    }
     if (decompiled) {
-        Location loc{fs::pathToUri(*decompiled), Range{{0, 0}, {0, 0}}};
+        Range defRange{{0, 0}, {0, 0}};
+        std::ifstream dFile(*decompiled);
+        std::string dLine;
+        int lineNo = 0;
+        while (std::getline(dFile, dLine)) {
+            size_t found = dLine.find(symbol);
+            if (found != std::string::npos) {
+                bool left = (found == 0 || (!std::isalnum(static_cast<unsigned char>(dLine[found - 1])) && dLine[found - 1] != '_'));
+                bool right = (found + symbol.size() >= dLine.size() || (!std::isalnum(static_cast<unsigned char>(dLine[found + symbol.size()])) && dLine[found + symbol.size()] != '_'));
+                if (left && right) {
+                    defRange = Range{{lineNo, static_cast<int>(found)}, {lineNo, static_cast<int>(found + symbol.size())}};
+                    break;
+                }
+            }
+            lineNo++;
+        }
+        Location loc{fs::pathToUri(*decompiled), defRange};
         llvm::json::Array arr;
         arr.push_back(toJson(loc));
         transport_.writeResponse(id, llvm::json::Value(std::move(arr)));
@@ -385,6 +465,10 @@ void Server::handleTextDocumentDeclaration(const llvm::json::Value& id, const ll
         if (!std::getline(stream, line)) { line = ""; break; }
     }
     std::string symbol = extractSymbolAtPosition(line, pos.character);
+    if (symbol.empty() || isPrimitiveOrKeyword(symbol)) {
+        transport_.writeResponse(id, llvm::json::Array{});
+        return;
+    }
 
     // If on "log", jump to slf4j Logger
     if (symbol == "log") {
@@ -455,10 +539,14 @@ void Server::handleTextDocumentImplementation(const llvm::json::Value& id, const
         if (!std::getline(stream, line)) { line = ""; break; }
     }
     std::string symbol = extractSymbolAtPosition(line, pos.character);
+    if (symbol.empty() || isPrimitiveOrKeyword(symbol)) {
+        transport_.writeResponse(id, llvm::json::Array{});
+        return;
+    }
 
     // If on "log", jump to logback Logger implementation
     if (symbol == "log") {
-        auto src = DecompilationService::instance().resolveSourceForFqn("ch.qos.logback.classic.Logger");
+        auto src = DecompilationService::instance().resolveSourceForFqn("ch.qos.logback.classic.Logger", &symTab_);
         if (src) {
             Location loc{fs::pathToUri(*src), Range{{0, 0}, {0, 0}}};
             llvm::json::Array arr;
@@ -488,32 +576,50 @@ void Server::handleTextDocumentImplementation(const llvm::json::Value& id, const
     // If in interface file (e.g. UserService.java), find Impl file
     for (const auto& cls : cu->classes) {
         if (cls.kind == ClassKind::INTERFACE) {
+            // For MyBatis Mapper interfaces, there is no Java Impl class!
+            if (cls.name.find("Mapper") != std::string::npos || uri->str().find("Mapper.java") != std::string::npos) {
+                auto mybatisLocs = MyBatisXmlService::instance().findDefinitions(uri->str(), pos, cu->sourceText, symTab_);
+                if (!mybatisLocs.empty()) {
+                    llvm::json::Array arr;
+                    for (const auto& l : mybatisLocs) {
+                        arr.push_back(toJson(l));
+                    }
+                    transport_.writeResponse(id, llvm::json::Value(std::move(arr)));
+                    return;
+                }
+                transport_.writeResponse(id, llvm::json::Array{});
+                return;
+            }
+
             std::string implUri = uri->str();
             size_t lastSlash = implUri.find_last_of('/');
             if (lastSlash != std::string::npos) {
                 implUri = implUri.substr(0, lastSlash) + "/impl/" + cls.name + "Impl.java";
-                auto implCu = pm_.getCompilationUnit(implUri);
-                Range targetRange{{0, 0}, {0, 0}};
-                if (implCu) {
-                    for (const auto& ic : implCu->classes) {
-                        for (const auto& m : ic.methods) {
-                            if (m.name == symbol) {
-                                targetRange = m.nameRange;
-                                break;
+                std::string implPath = fs::uriToPath(implUri);
+                if (fs::fileExists(implPath)) {
+                    auto implCu = pm_.getCompilationUnit(implUri);
+                    Range targetRange{{0, 0}, {0, 0}};
+                    if (implCu) {
+                        for (const auto& ic : implCu->classes) {
+                            for (const auto& m : ic.methods) {
+                                if (m.name == symbol) {
+                                    targetRange = m.nameRange;
+                                    break;
+                                }
                             }
                         }
                     }
+                    Location loc{implUri, targetRange};
+                    llvm::json::Array arr;
+                    arr.push_back(toJson(loc));
+                    transport_.writeResponse(id, llvm::json::Value(std::move(arr)));
+                    return;
                 }
-                Location loc{implUri, targetRange};
-                llvm::json::Array arr;
-                arr.push_back(toJson(loc));
-                transport_.writeResponse(id, llvm::json::Value(std::move(arr)));
-                return;
             }
         }
     }
 
-    handleTextDocumentDefinition(id, params);
+    transport_.writeResponse(id, llvm::json::Array{});
 }
 
 void Server::handleTextDocumentTypeDefinition(const llvm::json::Value& id, const llvm::json::Value& params) {
@@ -762,6 +868,46 @@ void Server::handleTextDocumentReferences(const llvm::json::Value& id, const llv
     transport_.writeResponse(id, llvm::json::Value(std::move(arr)));
 }
 
+void Server::handleTextDocumentPrepareRename(const llvm::json::Value& id, const llvm::json::Value& params) {
+    auto obj = params.getAsObject();
+    if (!obj) { transport_.writeResponse(id, nullptr); return; }
+    auto td = obj->getObject("textDocument");
+    auto posVal = obj->get("position");
+    if (!td || !posVal) { transport_.writeResponse(id, nullptr); return; }
+    auto uri = td->getString("uri");
+    Position pos;
+    if (!uri || !parsePosition(*posVal, pos)) { transport_.writeResponse(id, nullptr); return; }
+
+    auto cu = pm_.getCompilationUnit(uri->str());
+    if (!cu) { transport_.writeResponse(id, nullptr); return; }
+
+    std::istringstream stream(cu->sourceText);
+    std::string line;
+    for (int i = 0; i <= pos.line; ++i) {
+        if (!std::getline(stream, line)) { line = ""; break; }
+    }
+    std::string symbol = extractSymbolAtPosition(line, pos.character);
+    if (symbol.empty() || isPrimitiveOrKeyword(symbol)) {
+        transport_.writeResponse(id, nullptr);
+        return;
+    }
+
+    int start = pos.character;
+    while (start > 0 && (std::isalnum(static_cast<unsigned char>(line[start - 1])) || line[start - 1] == '_')) {
+        --start;
+    }
+    int end = pos.character;
+    while (end < static_cast<int>(line.size()) && (std::isalnum(static_cast<unsigned char>(line[end])) || line[end] == '_')) {
+        ++end;
+    }
+
+    llvm::json::Object res{
+        {"range", toJson(Range{{pos.line, start}, {pos.line, end}})},
+        {"placeholder", symbol}
+    };
+    transport_.writeResponse(id, llvm::json::Value(std::move(res)));
+}
+
 void Server::handleTextDocumentRename(const llvm::json::Value& id, const llvm::json::Value& params) {
     auto obj = params.getAsObject();
     if (!obj) { transport_.writeResponse(id, nullptr); return; }
@@ -783,18 +929,67 @@ void Server::handleTextDocumentRename(const llvm::json::Value& id, const llvm::j
         if (!std::getline(stream, line)) { line = ""; break; }
     }
     std::string symbol = extractSymbolAtPosition(line, pos.character);
+    if (symbol.empty() || isPrimitiveOrKeyword(symbol)) {
+        transport_.writeResponse(id, nullptr);
+        return;
+    }
 
     WorkspaceEdit we;
-    if (!symbol.empty()) {
+    std::vector<TextEdit> edits;
+
+    // Check if this symbol is a local variable or parameter in the current scope
+    auto scope = pm_.getFileScope(uri->str());
+    auto innerScope = scope ? scope->findInnermostScope(pos) : nullptr;
+    auto var = innerScope ? innerScope->lookupVariable(symbol) : std::nullopt;
+
+    if (var.has_value() && innerScope && innerScope->kind() != ScopeKind::FILE && innerScope->kind() != ScopeKind::CLASS) {
+        // Local variable or parameter: rename ONLY within its enclosing method or lambda scope
+        Range scopeRange = innerScope->range();
+        int startLine = (scopeRange.start.line > 0) ? scopeRange.start.line : 0;
+        int endLine = (scopeRange.end.line > 0) ? scopeRange.end.line : static_cast<int>(cu->sourceText.size());
+
         std::istringstream fstream(cu->sourceText);
         std::string fline;
         int lineIdx = 0;
-        std::vector<TextEdit> edits;
         while (std::getline(fstream, fline)) {
+            if (lineIdx >= startLine && lineIdx <= endLine) {
+                size_t c = 0;
+                while ((c = fline.find(symbol, c)) != std::string::npos) {
+                    bool leftOk = (c == 0 || (!std::isalnum(static_cast<unsigned char>(fline[c - 1])) && fline[c - 1] != '_'));
+                    bool rightOk = (c + symbol.size() >= fline.size() || (!std::isalnum(static_cast<unsigned char>(fline[c + symbol.size()])) && fline[c + symbol.size()] != '_'));
+                    // Make sure it's not a member access on another object: e.g. other.symbol
+                    if (leftOk && c > 0 && fline[c - 1] == '.') {
+                        if (c < 5 || fline.substr(c - 5, 5) != "this.") {
+                            leftOk = false;
+                        }
+                    }
+                    if (leftOk && rightOk) {
+                        TextEdit edit;
+                        edit.range = Range{{lineIdx, static_cast<int>(c)}, {lineIdx, static_cast<int>(c + symbol.size())}};
+                        edit.newText = newName;
+                        edits.push_back(edit);
+                    }
+                    c += symbol.size();
+                }
+            }
+            lineIdx++;
+        }
+    } else {
+        // Field, method, or class: rename references within the compilation unit, avoiding comments
+        std::istringstream fstream(cu->sourceText);
+        std::string fline;
+        int lineIdx = 0;
+        while (std::getline(fstream, fline)) {
+            std::string trimmed = fline;
+            size_t firstNonBlank = trimmed.find_first_not_of(" \t");
+            if (firstNonBlank != std::string::npos && (trimmed.substr(firstNonBlank, 2) == "//" || trimmed.substr(firstNonBlank, 1) == "*")) {
+                lineIdx++;
+                continue;
+            }
             size_t c = 0;
             while ((c = fline.find(symbol, c)) != std::string::npos) {
-                bool leftOk = (c == 0 || !std::isalnum(static_cast<unsigned char>(fline[c - 1])));
-                bool rightOk = (c + symbol.size() >= fline.size() || !std::isalnum(static_cast<unsigned char>(fline[c + symbol.size()])));
+                bool leftOk = (c == 0 || (!std::isalnum(static_cast<unsigned char>(fline[c - 1])) && fline[c - 1] != '_'));
+                bool rightOk = (c + symbol.size() >= fline.size() || (!std::isalnum(static_cast<unsigned char>(fline[c + symbol.size()])) && fline[c + symbol.size()] != '_'));
                 if (leftOk && rightOk) {
                     TextEdit edit;
                     edit.range = Range{{lineIdx, static_cast<int>(c)}, {lineIdx, static_cast<int>(c + symbol.size())}};
@@ -805,14 +1000,391 @@ void Server::handleTextDocumentRename(const llvm::json::Value& id, const llvm::j
             }
             lineIdx++;
         }
-        we.changes[uri->str()] = std::move(edits);
+    }
+
+    we.changes[uri->str()] = std::move(edits);
+
+    // If a top-level class was renamed, also update file name and cache in ProjectManager
+    bool isTopLevelClass = false;
+    for (const auto& c : cu->classes) {
+        if (c.name == symbol) {
+            isTopLevelClass = true;
+            break;
+        }
+    }
+    std::string currentUri = uri->str();
+    size_t lastSlash = currentUri.find_last_of('/');
+    std::string fileName = (lastSlash != std::string::npos) ? currentUri.substr(lastSlash + 1) : "";
+    std::string expectedFileName = symbol + ".java";
+
+    if (isTopLevelClass && fileName == expectedFileName) {
+        std::string newUri = currentUri.substr(0, lastSlash + 1) + newName + ".java";
+        pm_.renameFile(currentUri, newUri);
     }
 
     transport_.writeResponse(id, toJson(we));
 }
 
+void Server::handleTextDocumentFormatting(const llvm::json::Value& id, const llvm::json::Value& params) {
+    auto obj = params.getAsObject();
+    if (!obj) { transport_.writeResponse(id, nullptr); return; }
+    auto td = obj->getObject("textDocument");
+    if (!td) { transport_.writeResponse(id, nullptr); return; }
+    auto uri = td->getString("uri");
+    if (!uri) { transport_.writeResponse(id, nullptr); return; }
+
+    std::string content = pm_.getFileContent(uri->str());
+    if (content.empty()) {
+        auto cu = pm_.getCompilationUnit(uri->str());
+        if (cu) content = cu->sourceText;
+    }
+    if (content.empty()) {
+        transport_.writeResponse(id, llvm::json::Array{});
+        return;
+    }
+
+    std::istringstream stream(content);
+    std::string line;
+    std::string formatted;
+    int indentLevel = 0;
+    while (std::getline(stream, line)) {
+        size_t start = line.find_first_not_of(" \t");
+        if (start == std::string::npos) {
+            formatted += "\n";
+            continue;
+        }
+        std::string trimmed = line.substr(start);
+        if (!trimmed.empty() && (trimmed[0] == '}' || trimmed[0] == ')')) {
+            if (indentLevel > 0) indentLevel--;
+        }
+        formatted += std::string(indentLevel * 4, ' ') + trimmed + "\n";
+        for (char ch : trimmed) {
+            if (ch == '{') indentLevel++;
+        }
+    }
+
+    TextEdit edit;
+    int totalLines = 0;
+    for (char ch : content) if (ch == '\n') totalLines++;
+    edit.range = Range{{0, 0}, {totalLines + 1, 0}};
+    edit.newText = formatted;
+
+    llvm::json::Array arr;
+    arr.push_back(toJson(edit));
+    transport_.writeResponse(id, llvm::json::Value(std::move(arr)));
+}
+
+static int levenshteinDistance(const std::string& s1, const std::string& s2) {
+    size_t m = s1.size();
+    size_t n = s2.size();
+    std::vector<std::vector<int>> dp(m + 1, std::vector<int>(n + 1, 0));
+    for (size_t i = 0; i <= m; ++i) dp[i][0] = i;
+    for (size_t j = 0; j <= n; ++j) dp[0][j] = j;
+    for (size_t i = 1; i <= m; ++i) {
+        for (size_t j = 1; j <= n; ++j) {
+            if (s1[i - 1] == s2[j - 1]) dp[i][j] = dp[i - 1][j - 1];
+            else dp[i][j] = 1 + std::min({dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]});
+        }
+    }
+    return dp[m][n];
+}
+
+void Server::handleTextDocumentCodeAction(const llvm::json::Value& id, const llvm::json::Value& params) {
+    llvm::json::Array actions;
+    auto obj = params.getAsObject();
+    if (!obj) {
+        transport_.writeResponse(id, llvm::json::Value(std::move(actions)));
+        return;
+    }
+    auto td = obj->getObject("textDocument");
+    if (!td) {
+        transport_.writeResponse(id, llvm::json::Value(std::move(actions)));
+        return;
+    }
+    auto uri = td->getString("uri");
+    if (!uri) {
+        transport_.writeResponse(id, llvm::json::Value(std::move(actions)));
+        return;
+    }
+    std::string uriStr = uri->str();
+
+    Range reqRange{{0, 0}, {0, 0}};
+    if (auto rVal = obj->get("range")) {
+        parseRange(*rVal, reqRange);
+    }
+
+    auto cu = pm_.getCompilationUnit(uriStr);
+    if (!cu) {
+        transport_.writeResponse(id, llvm::json::Value(std::move(actions)));
+        return;
+    }
+    std::string srcText = cu->sourceText;
+
+    // 1. Diagnostics-based Quick Fixes (missing imports, typos)
+    auto context = obj->getObject("context");
+    auto diagsArr = context ? context->getArray("diagnostics") : nullptr;
+    if (diagsArr) {
+        for (const auto& dVal : *diagsArr) {
+            auto dObj = dVal.getAsObject();
+            if (!dObj) continue;
+            std::string msg = dObj->getString("message").value_or("").str();
+            Range diagRange{{0, 0}, {0, 0}};
+            if (auto drVal = dObj->get("range")) {
+                parseRange(*drVal, diagRange);
+            }
+
+            // A. Missing type import: e.g. "Table cannot be resolved to a type"
+            size_t cannotResolve = msg.find(" cannot be resolved to a type");
+            if (cannotResolve != std::string::npos) {
+                std::string typeName = msg.substr(0, cannotResolve);
+                if (!typeName.empty() && typeName.front() == '@') typeName = typeName.substr(1);
+
+                auto candidates = symTab_.findClassesMatchingPrefix(typeName);
+                for (const auto& cand : candidates) {
+                    if (cand.name == typeName) {
+                        int insertLine = 0;
+                        std::istringstream lss(srcText);
+                        std::string curLine;
+                        int lineNum = 0;
+                        int lastImportLine = -1;
+                        int packageLine = -1;
+                        while (std::getline(lss, curLine)) {
+                            if (curLine.rfind("package ", 0) == 0) packageLine = lineNum;
+                            if (curLine.rfind("import ", 0) == 0) lastImportLine = lineNum;
+                            lineNum++;
+                        }
+                        if (lastImportLine >= 0) insertLine = lastImportLine + 1;
+                        else if (packageLine >= 0) insertLine = packageLine + 2;
+
+                        TextEdit te;
+                        te.range = Range{{insertLine, 0}, {insertLine, 0}};
+                        te.newText = "import " + cand.fqn + ";\n";
+
+                        WorkspaceEdit we;
+                        we.changes[uriStr].push_back(te);
+
+                        llvm::json::Object act{
+                            {"title", "Import '" + cand.fqn + "'"},
+                            {"kind", "quickfix"},
+                            {"isPreferred", true},
+                            {"edit", toJson(we)}
+                        };
+                        actions.push_back(std::move(act));
+                    }
+                }
+            }
+
+            // B. Typo / misspelled method or symbol
+            std::string typoSymbol = "";
+            size_t mStart = msg.find("'");
+            if (mStart != std::string::npos) {
+                size_t mEnd = msg.find("'", mStart + 1);
+                if (mEnd != std::string::npos) {
+                    typoSymbol = msg.substr(mStart + 1, mEnd - mStart - 1);
+                }
+            }
+            if (typoSymbol.empty() && diagRange.start.line == diagRange.end.line && diagRange.end.character > diagRange.start.character) {
+                std::istringstream lss(srcText);
+                std::string curLine;
+                for (int i = 0; i <= diagRange.start.line; ++i) {
+                    if (!std::getline(lss, curLine)) { curLine = ""; break; }
+                }
+                if (diagRange.end.character <= static_cast<int>(curLine.size())) {
+                    typoSymbol = curLine.substr(diagRange.start.character, diagRange.end.character - diagRange.start.character);
+                }
+            }
+
+            if (!typoSymbol.empty() && typoSymbol.size() >= 3) {
+                for (const auto& cls : cu->classes) {
+                    for (const auto& m : cls.methods) {
+                        if (m.name != typoSymbol && levenshteinDistance(typoSymbol, m.name) <= 2) {
+                            TextEdit te;
+                            te.range = diagRange;
+                            te.newText = m.name;
+
+                            WorkspaceEdit we;
+                            we.changes[uriStr].push_back(te);
+
+                            llvm::json::Object act{
+                                {"title", "Change to '" + m.name + "'"},
+                                {"kind", "quickfix"},
+                                {"isPreferred", true},
+                                {"edit", toJson(we)}
+                            };
+                            actions.push_back(std::move(act));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Source Action: Organize Imports
+    std::vector<std::string> sortedImports = cu->imports;
+    std::sort(sortedImports.begin(), sortedImports.end());
+    sortedImports.erase(std::unique(sortedImports.begin(), sortedImports.end()), sortedImports.end());
+
+    std::string newImportsText;
+    for (const auto& imp : sortedImports) {
+        newImportsText += "import " + imp + ";\n";
+    }
+
+    int firstImpLine = -1;
+    int lastImpLine = -1;
+    std::istringstream lssImp(srcText);
+    std::string curImpLine;
+    int impLineNum = 0;
+    while (std::getline(lssImp, curImpLine)) {
+        if (curImpLine.rfind("import ", 0) == 0) {
+            if (firstImpLine < 0) firstImpLine = impLineNum;
+            lastImpLine = impLineNum;
+        }
+        impLineNum++;
+    }
+
+    WorkspaceEdit orgWe;
+    if (firstImpLine >= 0 && lastImpLine >= 0) {
+        TextEdit te;
+        te.range = Range{{firstImpLine, 0}, {lastImpLine + 1, 0}};
+        te.newText = newImportsText;
+        orgWe.changes[uriStr].push_back(te);
+    }
+
+    llvm::json::Object organizeImportsAction{
+        {"title", "Organize Imports"},
+        {"kind", "source.organizeImports"},
+        {"isPreferred", true},
+        {"edit", toJson(orgWe)}
+    };
+    actions.push_back(std::move(organizeImportsAction));
+
+    // 3. Refactoring: Extract Method (only when selection is inside a method body)
+    bool insideMethod = false;
+    for (const auto& cls : cu->classes) {
+        for (const auto& m : cls.methods) {
+            if (m.bodyRange.contains(reqRange.start) && reqRange.start.line < m.bodyRange.end.line) {
+                insideMethod = true;
+                break;
+            }
+        }
+    }
+
+    if (insideMethod && (reqRange.end.line > reqRange.start.line || reqRange.end.character > reqRange.start.character + 5)) {
+        std::istringstream lss(srcText);
+        std::string curLine;
+        std::string selectedCode;
+        int lineNum = 0;
+        int lastCloseBraceLine = -1;
+        while (std::getline(lss, curLine)) {
+            if (lineNum >= reqRange.start.line && lineNum <= reqRange.end.line) {
+                selectedCode += "        " + curLine + "\n";
+            }
+            if (curLine.find('}') != std::string::npos) {
+                lastCloseBraceLine = lineNum;
+            }
+            lineNum++;
+        }
+
+        if (!selectedCode.empty()) {
+            TextEdit callEdit;
+            callEdit.range = reqRange;
+            callEdit.newText = "    extractedMethod();\n";
+
+            TextEdit methodDefEdit;
+            int insertLine = (lastCloseBraceLine > 0) ? lastCloseBraceLine : lineNum;
+            methodDefEdit.range = Range{{insertLine, 0}, {insertLine, 0}};
+            methodDefEdit.newText =
+                "\n    private void extractedMethod() {\n" +
+                selectedCode +
+                "    }\n";
+
+            WorkspaceEdit we;
+            we.changes[uriStr].push_back(callEdit);
+            we.changes[uriStr].push_back(methodDefEdit);
+
+            llvm::json::Object act{
+                {"title", "Extract to method 'extractedMethod'"},
+                {"kind", "refactor.extract.function"},
+                {"isPreferred", true},
+                {"edit", toJson(we)}
+            };
+            actions.push_back(std::move(act));
+        }
+    }
+
+    transport_.writeResponse(id, llvm::json::Value(std::move(actions)));
+}
+
 void Server::handleWorkspaceDidRenameFiles(const llvm::json::Value& params) {
     LOG_INFO("workspace/didRenameFiles notification received");
+    auto obj = params.getAsObject();
+    if (!obj) return;
+    auto files = obj->getArray("files");
+    if (!files) return;
+    for (const auto& fVal : *files) {
+        auto fObj = fVal.getAsObject();
+        if (fObj) {
+            auto oldUri = fObj->getString("oldUri");
+            auto newUri = fObj->getString("newUri");
+            if (oldUri && newUri) {
+                pm_.renameFile(oldUri->str(), newUri->str());
+            }
+        }
+    }
+}
+
+void Server::handleJavaGetRefactorEdit(const llvm::json::Value& id, const llvm::json::Value& params) {
+    auto obj = params.getAsObject();
+    if (!obj) { transport_.writeResponse(id, nullptr); return; }
+    auto ctx = obj->getObject("context");
+    if (!ctx) { transport_.writeResponse(id, nullptr); return; }
+    auto td = ctx->getObject("textDocument");
+    auto rVal = ctx->get("range");
+    if (!td || !rVal) { transport_.writeResponse(id, nullptr); return; }
+    auto uri = td->getString("uri");
+    if (!uri) { transport_.writeResponse(id, nullptr); return; }
+    std::string uriStr = uri->str();
+
+    Range reqRange{{0, 0}, {0, 0}};
+    parseRange(*rVal, reqRange);
+
+    auto cu = pm_.getCompilationUnit(uriStr);
+    if (!cu) { transport_.writeResponse(id, nullptr); return; }
+
+    std::string srcText = cu->sourceText;
+    std::istringstream lss(srcText);
+    std::string curLine;
+    std::string selectedCode;
+    int lineNum = 0;
+    int lastCloseBraceLine = -1;
+    while (std::getline(lss, curLine)) {
+        if (lineNum >= reqRange.start.line && lineNum <= reqRange.end.line) {
+            selectedCode += "        " + curLine + "\n";
+        }
+        if (curLine.find('}') != std::string::npos) {
+            lastCloseBraceLine = lineNum;
+        }
+        lineNum++;
+    }
+
+    TextEdit callEdit;
+    callEdit.range = reqRange;
+    callEdit.newText = "    extractedMethod();\n";
+
+    TextEdit methodDefEdit;
+    int insertLine = (lastCloseBraceLine > 0) ? lastCloseBraceLine : lineNum;
+    methodDefEdit.range = Range{{insertLine, 0}, {insertLine, 0}};
+    methodDefEdit.newText =
+        "\n    private void extractedMethod() {\n" +
+        selectedCode +
+        "    }\n";
+
+    WorkspaceEdit we;
+    we.changes[uriStr].push_back(callEdit);
+    we.changes[uriStr].push_back(methodDefEdit);
+
+    transport_.writeResponse(id, toJson(we));
 }
 
 void Server::handleJavaOverridableMethods(const llvm::json::Value& id, const llvm::json::Value& params) {

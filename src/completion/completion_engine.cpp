@@ -7,6 +7,34 @@
 
 namespace javalsp {
 
+static std::string toLowerString(const std::string& s) {
+    std::string res = s;
+    for (char& c : res) c = std::tolower(static_cast<unsigned char>(c));
+    return res;
+}
+
+static int computeFilterScore(const std::string& label, const std::string& prefix) {
+    if (prefix.empty()) return 0;
+    if (label.rfind(prefix, 0) == 0) return 0;
+
+    std::string lowerLabel = toLowerString(label);
+    std::string lowerPrefix = toLowerString(prefix);
+
+    if (lowerLabel.rfind(lowerPrefix, 0) == 0) return 1;
+    if (label.find(prefix) != std::string::npos) return 2;
+    if (lowerLabel.find(lowerPrefix) != std::string::npos) return 3;
+
+    size_t pi = 0;
+    for (size_t li = 0; li < label.size() && pi < prefix.size(); ++li) {
+        if (std::tolower(static_cast<unsigned char>(label[li])) == std::tolower(static_cast<unsigned char>(prefix[pi]))) {
+            pi++;
+        }
+    }
+    if (pi == prefix.size()) return 4;
+
+    return -1;
+}
+
 CompletionEngine::CompletionEngine(const SymbolTable& symTab)
     : symTab_(symTab) {}
 
@@ -229,12 +257,15 @@ CompletionList CompletionEngine::complete(
         }
     }
 
-    // Filter by prefix if specified
+    // Filter and score by prefix / substring if specified
     if (!filterPrefix.empty()) {
         std::vector<CompletionItem> filtered;
-        for (const auto& it : list.items) {
-            if (it.label.rfind(filterPrefix, 0) == 0) {
-                filtered.push_back(it);
+        for (auto& it : list.items) {
+            int score = computeFilterScore(it.label, filterPrefix);
+            if (score >= 0) {
+                std::string origSort = it.sortText.empty() ? it.label : it.sortText;
+                it.sortText = std::to_string(score) + "_" + origSort;
+                filtered.push_back(std::move(it));
             }
         }
         list.items = std::move(filtered);

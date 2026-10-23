@@ -410,17 +410,20 @@ static PTestResult testJavaFile(
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cout << "Usage: ptest <path-to-java-project> [--file <specific-file>]" << std::endl;
+        std::cout << "Usage: ptest <path-to-java-project> [--file <specific-file>] [--report <report-path>] [--max-files <count>]" << std::endl;
         return 1;
     }
 
     std::string projectRoot = fs::normalizePath(argv[1]);
     std::string specificFile = "";
+    std::string reportPath = "";
     int maxFiles = 0;
 
     for (int i = 2; i < argc; ++i) {
         if (std::string(argv[i]) == "--file" && i + 1 < argc) {
             specificFile = argv[++i];
+        } else if (std::string(argv[i]) == "--report" && i + 1 < argc) {
+            reportPath = argv[++i];
         } else if (std::string(argv[i]) == "--max-files" && i + 1 < argc) {
             maxFiles = std::stoi(argv[++i]);
         }
@@ -430,6 +433,9 @@ int main(int argc, char** argv) {
     std::cout << "  ptest - Java LSP Simulation Test Tool " << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << "Target Project: " << projectRoot << std::endl;
+    if (!reportPath.empty()) {
+        std::cout << "Report Path:    " << reportPath << std::endl;
+    }
 
     auto& pm = ProjectManager::instance();
     pm.initWorkspace(projectRoot);
@@ -456,6 +462,10 @@ int main(int argc, char** argv) {
     int totalPassed = 0;
     int totalDiff = 0;
     int totalFailed = 0;
+    int aggregateTokens = 0;
+    int aggregateCompleted = 0;
+    int aggregateMissed = 0;
+    std::vector<PTestResult> allResults;
 
     for (size_t i = 0; i < javaFiles.size(); ++i) {
         const auto& f = javaFiles[i];
@@ -465,6 +475,11 @@ int main(int argc, char** argv) {
         std::cout << "[" << (i + 1) << "/" << javaFiles.size() << "] Testing " << fname << "... " << std::flush;
 
         auto res = testJavaFile(f, projectRoot, pm, completionEngine, projectCompilerErrors);
+        allResults.push_back(res);
+
+        aggregateTokens += res.totalTokens;
+        aggregateCompleted += res.completedTokens;
+        aggregateMissed += res.missedTokens;
 
         if (res.diagnosticsMatch && res.missedTokens == 0) {
             std::cout << "PASS (Tokens: " << res.completedTokens << "/" << res.totalTokens
@@ -488,7 +503,71 @@ int main(int argc, char** argv) {
     std::cout << "\n========================================" << std::endl;
     std::cout << "Summary: " << totalPassed << " Passed, " << totalDiff << " Diagnostic Differences, "
               << totalFailed << " Failed" << std::endl;
+    if (aggregateTokens > 0) {
+        double rate = (100.0 * aggregateCompleted) / aggregateTokens;
+        std::cout << "Token Completion Rate: " << aggregateCompleted << "/" << aggregateTokens
+                  << " (" << std::fixed << std::setprecision(1) << rate << "%)" << std::endl;
+    }
     std::cout << "========================================" << std::endl;
+
+    if (!reportPath.empty()) {
+        std::ofstream rpt(reportPath);
+        if (rpt.is_open()) {
+            rpt << "# ptest Simulation & Diagnostic Report\n\n";
+            rpt << "- **Target Project**: `" << projectRoot << "`\n";
+            rpt << "- **Total Files Tested**: " << allResults.size() << "\n";
+            rpt << "- **Passed**: " << totalPassed << "\n";
+            rpt << "- **Diagnostic Discrepancies**: " << totalDiff << "\n";
+            if (aggregateTokens > 0) {
+                double rate = (100.0 * aggregateCompleted) / aggregateTokens;
+                rpt << "- **Non-constant Token Completion Rate**: " << aggregateCompleted << " / "
+                    << aggregateTokens << " (" << std::fixed << std::setprecision(1) << rate << "%)\n";
+            }
+            rpt << "\n## Test Results by File\n\n";
+            rpt << "| File | Tokens (Completed/Total) | Missed | LSP Errors | Javac Errors | Status |\n";
+            rpt << "| :--- | :---: | :---: | :---: | :---: | :---: |\n";
+            for (const auto& r : allResults) {
+                size_t slash = r.filePath.find_last_of('/');
+                std::string fn = (slash != std::string::npos) ? r.filePath.substr(slash + 1) : r.filePath;
+                std::string status = (r.diagnosticsMatch && r.missedTokens == 0) ? "PASS" : (r.diagnosticsMatch ? "WARN" : "DIFF");
+                rpt << "| `" << fn << "` | " << r.completedTokens << "/" << r.totalTokens << " | "
+                    << r.missedTokens << " | " << r.lspErrors << " | " << r.javacErrors << " | **"
+                    << status << "** |\n";
+            }
+
+            if (totalDiff > 0 || aggregateMissed > 0) {
+                rpt << "\n## Discrepancy & Error Details\n\n";
+                for (const auto& r : allResults) {
+                    if (r.diagnosticsMatch && r.missedTokens == 0) continue;
+                    rpt << "### " << r.filePath << "\n\n";
+                    if (!r.diagnosticsMatch) {
+                        rpt << "- **LSP Error Count**: " << r.lspErrors << "\n";
+                        for (const auto& msg : r.lspErrorMsgs) {
+                            rpt << "  - `[LSP]` " << msg << "\n";
+                        }
+                        rpt << "- **Javac Error Count**: " << r.javacErrors << "\n";
+                        for (const auto& msg : r.javacErrorMsgs) {
+                            rpt << "  - `[JAVAC]` " << msg << "\n";
+                        }
+                    }
+                    if (r.missedTokens > 0) {
+                        rpt << "- **Missed Tokens (" << r.missedTokens << ")**:\n";
+                        for (size_t m = 0; m < r.missedTokenNames.size() && m < 15; ++m) {
+                            rpt << "  - `" << r.missedTokenNames[m] << "`\n";
+                        }
+                        if (r.missedTokenNames.size() > 15) {
+                            rpt << "  - *(and " << (r.missedTokenNames.size() - 15) << " more)*\n";
+                        }
+                    }
+                    rpt << "\n";
+                }
+            }
+            rpt.close();
+            std::cout << "Report written to " << reportPath << std::endl;
+        } else {
+            std::cerr << "Failed to open report path: " << reportPath << std::endl;
+        }
+    }
 
     return (totalDiff > 0 || totalFailed > 0) ? 1 : 0;
 }

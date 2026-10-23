@@ -22,6 +22,7 @@ private:
     void parseClass(TSNode node, const std::string& src, JavaCompilationUnit& cu, JavaClass* parentClass = nullptr);
     void parseField(TSNode node, const std::string& src, JavaClass& cls);
     void parseMethod(TSNode node, const std::string& src, JavaClass& cls);
+    void collectLocalVariables(TSNode node, const std::string& src, std::vector<JavaVariable>& localVars) const;
     std::shared_ptr<JavaLambda> parseLambda(TSNode node, const std::string& src, std::shared_ptr<JavaLambda> parentLambda);
 
     // Helpers

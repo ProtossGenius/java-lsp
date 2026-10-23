@@ -161,6 +161,7 @@ std::vector<JavaClass> JarIndexer::indexArchive(const std::string& archivePath) 
         cls.name = simpleName;
         cls.packageName = pkg;
         cls.fqn = fqn;
+        cls.sourceFilePath = archivePath;
         cls.kind = ClassKind::CLASS;
         classes.push_back(cls);
     }

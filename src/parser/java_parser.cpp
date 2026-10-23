@@ -354,29 +354,113 @@ void JavaParser::parseMethod(TSNode node, const std::string& src, JavaClass& cls
                     std::string(ts_node_type(param)) == "spread_parameter") {
                     JavaTypeRef ptype;
                     std::string pname;
+                    Range pNameRange = getNodeRange(param);
                     for (uint32_t k = 0; k < ts_node_child_count(param); ++k) {
                         TSNode pchild = ts_node_child(param, k);
                         std::string pchildType = ts_node_type(pchild);
                         if (pchildType == "type_identifier" || pchildType == "generic_type" ||
-                            pchildType == "integral_type" || pchildType == "boolean_type" ||
-                            pchildType == "array_type") {
+                            pchildType == "integral_type" || pchildType == "floating_point_type" ||
+                            pchildType == "boolean_type" || pchildType == "array_type") {
                             ptype = parseType(pchild, src);
                         } else if (pchildType == "identifier") {
                             pname = getNodeText(pchild, src);
+                            pNameRange = getNodeRange(pchild);
                         }
                     }
                     if (!pname.empty()) {
                         method.parameters.push_back({ptype, pname});
+                        method.parameterRanges.push_back(pNameRange);
                     }
                 }
             }
         } else if (ctype == "block") {
             method.bodyRange = getNodeRange(c);
+            collectLocalVariables(c, src, method.localVariables);
         }
     }
 
     if (!method.name.empty()) {
         cls.methods.push_back(std::move(method));
+    }
+}
+
+void JavaParser::collectLocalVariables(TSNode node, const std::string& src, std::vector<JavaVariable>& localVars) const {
+    if (ts_node_is_null(node)) return;
+    std::string type = ts_node_type(node);
+    if (type == "local_variable_declaration") {
+        JavaTypeRef varType;
+        for (uint32_t i = 0; i < ts_node_child_count(node); ++i) {
+            TSNode c = ts_node_child(node, i);
+            std::string ctype = ts_node_type(c);
+            if (ctype == "type_identifier" || ctype == "generic_type" ||
+                ctype == "integral_type" || ctype == "floating_point_type" ||
+                ctype == "boolean_type" || ctype == "array_type") {
+                varType = parseType(c, src);
+            } else if (ctype == "variable_declarator") {
+                for (uint32_t j = 0; j < ts_node_child_count(c); ++j) {
+                    TSNode v = ts_node_child(c, j);
+                    if (std::string(ts_node_type(v)) == "identifier") {
+                        JavaVariable jv;
+                        jv.name = getNodeText(v, src);
+                        jv.type = varType;
+                        jv.range = getNodeRange(c);
+                        jv.nameRange = getNodeRange(v);
+                        localVars.push_back(jv);
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (type == "enhanced_for_statement") {
+        JavaTypeRef varType;
+        std::string varName;
+        Range nameRange;
+        for (uint32_t i = 0; i < ts_node_child_count(node); ++i) {
+            TSNode c = ts_node_child(node, i);
+            std::string ctype = ts_node_type(c);
+            if (ctype == "type_identifier" || ctype == "generic_type" ||
+                ctype == "integral_type" || ctype == "floating_point_type" ||
+                ctype == "boolean_type" || ctype == "array_type") {
+                varType = parseType(c, src);
+            } else if (ctype == "identifier" && varName.empty()) {
+                varName = getNodeText(c, src);
+                nameRange = getNodeRange(c);
+            }
+        }
+        if (!varName.empty()) {
+            JavaVariable jv;
+            jv.name = varName;
+            jv.type = varType;
+            jv.range = getNodeRange(node);
+            jv.nameRange = nameRange;
+            localVars.push_back(jv);
+        }
+    } else if (type == "catch_formal_parameter") {
+        JavaTypeRef varType;
+        std::string varName;
+        Range nameRange;
+        for (uint32_t i = 0; i < ts_node_child_count(node); ++i) {
+            TSNode c = ts_node_child(node, i);
+            std::string ctype = ts_node_type(c);
+            if (ctype == "catch_type" || ctype == "type_identifier") {
+                varType = parseType(c, src);
+            } else if (ctype == "identifier") {
+                varName = getNodeText(c, src);
+                nameRange = getNodeRange(c);
+            }
+        }
+        if (!varName.empty()) {
+            JavaVariable jv;
+            jv.name = varName;
+            jv.type = varType;
+            jv.range = getNodeRange(node);
+            jv.nameRange = nameRange;
+            localVars.push_back(jv);
+        }
+    }
+
+    for (uint32_t i = 0; i < ts_node_child_count(node); ++i) {
+        collectLocalVariables(ts_node_child(node, i), src, localVars);
     }
 }
 

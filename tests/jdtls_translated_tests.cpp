@@ -225,3 +225,98 @@ public class ScopedTypeProbe {
     }
     ASSERT_TRUE(diags.empty());
 }
+
+TEST(JdtlsTranslatedTest, UnimportedAnnotationReportsDiagnostic) {
+    auto& symTab = SymbolTable::instance();
+    JavaParser parser;
+    ASSERT_TRUE(parser.init());
+
+    std::string src = R"java(
+package com.example.demo.model;
+
+@Table("user")
+public class User {
+    private Long id;
+}
+)java";
+
+    auto cu = parser.parse(src, "User.java");
+    ASSERT_TRUE(cu != nullptr);
+
+    auto diags = TypeChecker::check(*cu, src, TSNode{}, symTab);
+    ASSERT_TRUE(!diags.empty());
+    bool foundTableError = false;
+    for (const auto& d : diags) {
+        if (d.message.find("Table cannot be resolved to a type") != std::string::npos) {
+            foundTableError = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(foundTableError);
+}
+
+TEST(JdtlsTranslatedTest, ImportedClassInnerClassResolutionWithDollarFqn) {
+    auto& symTab = SymbolTable::instance();
+    // Simulate JarIndexer registering an inner class with dollar sign
+    JavaClass innerCls;
+    innerCls.name = "Parameters";
+    innerCls.packageName = "org.junit.runners";
+    innerCls.fqn = "org.junit.runners.Parameterized$Parameters";
+    innerCls.kind = ClassKind::CLASS;
+    symTab.addClass(innerCls);
+
+    // Verify findClassByFqn works with both dollar and dot
+    const JavaClass* byDollar = symTab.findClassByFqn("org.junit.runners.Parameterized$Parameters");
+    ASSERT_TRUE(byDollar != nullptr);
+    const JavaClass* byDot = symTab.findClassByFqn("org.junit.runners.Parameterized.Parameters");
+    ASSERT_TRUE(byDot != nullptr);
+    ASSERT_EQ(byDollar, byDot);
+
+    // Also register an inner class with dot and verify lookup with dollar
+    JavaClass dotInnerCls;
+    dotInnerCls.name = "Builder";
+    dotInnerCls.packageName = "com.sample";
+    dotInnerCls.fqn = "com.sample.Container.Builder";
+    dotInnerCls.kind = ClassKind::CLASS;
+    symTab.addClass(dotInnerCls);
+
+    const JavaClass* dotFoundByDollar = symTab.findClassByFqn("com.sample.Container$Builder");
+    ASSERT_TRUE(dotFoundByDollar != nullptr);
+    const JavaClass* dotFoundByDot = symTab.findClassByFqn("com.sample.Container.Builder");
+    ASSERT_TRUE(dotFoundByDot != nullptr);
+    ASSERT_EQ(dotFoundByDollar, dotFoundByDot);
+
+    JavaParser parser;
+    ASSERT_TRUE(parser.init());
+
+    std::string src = R"java(
+package com.sample;
+
+import org.junit.runners.Parameterized;
+
+public class TestSample {
+    @Parameterized.Parameters
+    public void run() {}
+}
+)java";
+
+    auto cu = parser.parse(src, "TestSample.java");
+    ASSERT_TRUE(cu != nullptr);
+
+    // Verify resolveClass works with both dot and dollar
+    const JavaClass* resolvedByDot = symTab.resolveClass("Parameterized.Parameters", *cu);
+    ASSERT_TRUE(resolvedByDot != nullptr);
+    const JavaClass* resolvedByDollar = symTab.resolveClass("Parameterized$Parameters", *cu);
+    ASSERT_TRUE(resolvedByDollar != nullptr);
+    ASSERT_EQ(resolvedByDot, resolvedByDollar);
+
+    auto diags = TypeChecker::check(*cu, src, TSNode{}, symTab);
+    bool hasDiag = false;
+    for (const auto& d : diags) {
+        if (d.message.find("Parameterized.Parameters") != std::string::npos) {
+            hasDiag = true;
+            break;
+        }
+    }
+    ASSERT_FALSE(hasDiag);
+}

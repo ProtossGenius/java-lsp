@@ -58,10 +58,19 @@ struct JavaField {
     }
 };
 
+struct JavaVariable {
+    std::string name;
+    JavaTypeRef type;
+    Range range;
+    Range nameRange;
+    bool isFinal{false};
+};
+
 struct JavaMethod {
     std::string name;
     JavaTypeRef returnType;
     std::vector<std::pair<JavaTypeRef, std::string>> parameters;
+    std::vector<Range> parameterRanges;
     std::vector<std::string> modifiers;
     std::vector<std::string> annotations;
     Range range;
@@ -69,6 +78,7 @@ struct JavaMethod {
     Range bodyRange;
     std::string docComment;
     bool isConstructor{false};
+    std::vector<JavaVariable> localVariables;
 
     std::string signature() const {
         std::string sig = name + "(";
@@ -79,14 +89,6 @@ struct JavaMethod {
         sig += ")";
         return sig;
     }
-};
-
-struct JavaVariable {
-    std::string name;
-    JavaTypeRef type;
-    Range range;
-    Range nameRange;
-    bool isFinal{false};
 };
 
 struct JavaLambda {
@@ -112,6 +114,7 @@ struct JavaClass {
     std::string packageName;
     std::string fqn;
     std::string filePath;
+    std::string sourceFilePath;
     ClassKind kind{ClassKind::CLASS};
     std::optional<JavaTypeRef> extendsType;
     std::vector<JavaTypeRef> implementsTypes;

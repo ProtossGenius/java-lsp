@@ -70,12 +70,21 @@ static void registerClassAndInners(JavaClass& cls, const std::string& path, Symb
     }
     for (const auto& m : cls.methods) {
         auto methodScope = Scope::create(ScopeKind::METHOD, classScope, m.range);
-        for (const auto& p : m.parameters) {
+        for (size_t pi = 0; pi < m.parameters.size(); ++pi) {
+            const auto& p = m.parameters[pi];
             JavaVariable pvar;
             pvar.name = p.second;
             pvar.type = p.first;
             pvar.range = m.range;
+            if (pi < m.parameterRanges.size()) {
+                pvar.nameRange = m.parameterRanges[pi];
+            } else {
+                pvar.nameRange = m.range;
+            }
             methodScope->addVariable(pvar);
+        }
+        for (const auto& lv : m.localVariables) {
+            methodScope->addVariable(lv);
         }
     }
     for (auto& inner : cls.innerClasses) {
@@ -103,6 +112,9 @@ void ProjectManager::indexJavaFile(const std::string& path) {
 }
 
 std::shared_ptr<JavaCompilationUnit> ProjectManager::getCompilationUnit(const std::string& uri) {
+    if (uri.size() >= 4 && uri.substr(uri.size() - 4) == ".xml") {
+        return nullptr;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = fileCUs_.find(uri);
     if (it != fileCUs_.end()) {
@@ -152,6 +164,39 @@ void ProjectManager::updateFile(const std::string& uri, const std::string& newCo
 
 void ProjectManager::closeFile(const std::string& uri) {
     // Keep cached CU for cross-file navigation
+}
+
+void ProjectManager::removeFile(const std::string& uri) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fileCUs_.erase(uri);
+    fileScopes_.erase(uri);
+    fileBuffers_.erase(uri);
+}
+
+void ProjectManager::renameFile(const std::string& oldUri, const std::string& newUri) {
+    std::string content;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto itContent = fileBuffers_.find(oldUri);
+        if (itContent != fileBuffers_.end()) {
+            content = itContent->second;
+        } else {
+            std::string oldPath = fs::uriToPath(oldUri);
+            content = fs::readFile(oldPath);
+        }
+        fileCUs_.erase(oldUri);
+        fileScopes_.erase(oldUri);
+        fileBuffers_.erase(oldUri);
+
+        std::string oldPath = fs::uriToPath(oldUri);
+        std::string newPath = fs::uriToPath(newUri);
+        if (fs::fileExists(oldPath) && !fs::fileExists(newPath)) {
+            std::rename(oldPath.c_str(), newPath.c_str());
+        }
+    }
+    if (!content.empty()) {
+        updateFile(newUri, content);
+    }
 }
 
 std::string ProjectManager::getFileContent(const std::string& uri) {

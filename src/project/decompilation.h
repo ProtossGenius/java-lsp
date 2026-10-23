@@ -5,6 +5,8 @@
 
 namespace javalsp {
 
+class SymbolTable;
+
 class DecompilationService {
 public:
     static DecompilationService& instance();
@@ -16,7 +18,7 @@ public:
     std::optional<std::string> getJarSource(const std::string& jarPath, const std::string& classFqn);
     std::optional<std::string> decompileClass(const std::string& classFilePath);
 
-    std::optional<std::string> resolveSourceForFqn(const std::string& fqn);
+    std::optional<std::string> resolveSourceForFqn(const std::string& fqn, const SymbolTable* symTab = nullptr);
 
 private:
     DecompilationService();

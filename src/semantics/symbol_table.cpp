@@ -17,16 +17,26 @@ void SymbolTable::clear() {
     classesByFqn_.clear();
     fqnsByName_.clear();
     classesByPackage_.clear();
+    normalizedToActualFqn_.clear();
     registerJdkTypes();
 }
 
 static const JavaClass* findInClassHierarchy(const JavaClass& cls, const std::string& targetName) {
     if (cls.name == targetName || cls.fqn == targetName) return &cls;
-    if (cls.fqn.size() > targetName.size() &&
-        cls.fqn.compare(cls.fqn.size() - targetName.size(), targetName.size(), targetName) == 0 &&
-        cls.fqn[cls.fqn.size() - targetName.size() - 1] == '.') {
+
+    std::string normFqn = cls.fqn;
+    std::replace(normFqn.begin(), normFqn.end(), '$', '.');
+    std::string normTarget = targetName;
+    std::replace(normTarget.begin(), normTarget.end(), '$', '.');
+
+    if (normFqn == normTarget || cls.name == normTarget) return &cls;
+
+    if (normFqn.size() > normTarget.size() &&
+        normFqn.compare(normFqn.size() - normTarget.size(), normTarget.size(), normTarget) == 0 &&
+        normFqn[normFqn.size() - normTarget.size() - 1] == '.') {
         return &cls;
     }
+
     for (const auto& inner : cls.innerClasses) {
         auto found = findInClassHierarchy(inner, targetName);
         if (found) return found;
@@ -37,32 +47,77 @@ static const JavaClass* findInClassHierarchy(const JavaClass& cls, const std::st
 void SymbolTable::addClass(const JavaClass& cls) {
     std::string fqn = cls.fqn.empty() ? cls.name : cls.fqn;
 
-    // Do not overwrite rich source class with a stub without methods or filePath
-    auto it = classesByFqn_.find(fqn);
-    if (it != classesByFqn_.end()) {
-        if (!it->second.filePath.empty() && cls.filePath.empty()) {
+    // Check if class already exists under fqn or its dot/dollar equivalent
+    const JavaClass* existing = findClassByFqn(fqn);
+    if (existing) {
+        // Do not overwrite rich source class with a stub without methods or filePath
+        if (!existing->filePath.empty() && cls.filePath.empty()) {
             return;
         }
-        if (!it->second.methods.empty() && cls.methods.empty()) {
+        if (!existing->methods.empty() && cls.methods.empty()) {
             return;
+        }
+        if (existing->fqn != fqn && classesByFqn_.find(existing->fqn) != classesByFqn_.end()) {
+            classesByFqn_[existing->fqn] = cls;
         }
     }
 
     classesByFqn_[fqn] = cls;
     const JavaClass* storedCls = &classesByFqn_[fqn];
     if (!storedCls->packageName.empty()) {
-        classesByPackage_[storedCls->packageName].push_back(storedCls);
-    }
-    auto& list = fqnsByName_[cls.name];
-    bool exists = false;
-    for (const auto& existing : list) {
-        if (existing == fqn) {
-            exists = true;
-            break;
+        auto& pkgList = classesByPackage_[storedCls->packageName];
+        bool inPkg = false;
+        for (const auto* p : pkgList) {
+            if (p == storedCls || p->fqn == fqn) {
+                inPkg = true;
+                break;
+            }
+        }
+        if (!inPkg) {
+            pkgList.push_back(storedCls);
         }
     }
-    if (!exists) {
-        list.push_back(fqn);
+
+    if (fqn.find('$') != std::string::npos) {
+        std::string dotFqn = fqn;
+        std::replace(dotFqn.begin(), dotFqn.end(), '$', '.');
+        normalizedToActualFqn_[dotFqn] = fqn;
+        normalizedToActualFqn_[fqn] = fqn;
+    }
+    if (existing && !existing->fqn.empty()) {
+        normalizedToActualFqn_[existing->fqn] = fqn;
+        std::string exDot = existing->fqn;
+        std::replace(exDot.begin(), exDot.end(), '$', '.');
+        normalizedToActualFqn_[exDot] = fqn;
+    }
+
+    auto addFqnName = [&](const std::string& name, const std::string& fqnToAdd) {
+        if (name.empty()) return;
+        auto& list = fqnsByName_[name];
+        for (const auto& ex : list) {
+            if (ex == fqnToAdd) return;
+        }
+        list.push_back(fqnToAdd);
+    };
+
+    addFqnName(cls.name, fqn);
+    if (cls.name.find('$') != std::string::npos) {
+        std::string dotName = cls.name;
+        std::replace(dotName.begin(), dotName.end(), '$', '.');
+        addFqnName(dotName, fqn);
+        size_t lastDollar = cls.name.find_last_of('$');
+        addFqnName(cls.name.substr(lastDollar + 1), fqn);
+    }
+    if (cls.name.find('.') != std::string::npos) {
+        std::string dollarName = cls.name;
+        std::replace(dollarName.begin(), dollarName.end(), '.', '$');
+        addFqnName(dollarName, fqn);
+        size_t lastDot = cls.name.find_last_of('.');
+        addFqnName(cls.name.substr(lastDot + 1), fqn);
+    }
+    if (fqn.find('$') != std::string::npos) {
+        size_t lastDollar = fqn.find_last_of('$');
+        addFqnName(fqn.substr(lastDollar + 1), fqn);
     }
 
     // Recursively register inner classes
@@ -72,8 +127,53 @@ void SymbolTable::addClass(const JavaClass& cls) {
 }
 
 const JavaClass* SymbolTable::findClassByFqn(const std::string& fqn) const {
+    if (fqn.empty()) return nullptr;
+
+    // 1. Direct lookup in classesByFqn_
     auto it = classesByFqn_.find(fqn);
     if (it != classesByFqn_.end()) return &it->second;
+
+    // 2. Lookup via normalized FQN map
+    std::string norm = fqn;
+    std::replace(norm.begin(), norm.end(), '$', '.');
+    auto itNorm = normalizedToActualFqn_.find(norm);
+    if (itNorm != normalizedToActualFqn_.end()) {
+        auto itActual = classesByFqn_.find(itNorm->second);
+        if (itActual != classesByFqn_.end()) return &itActual->second;
+    }
+
+    // 3. Try norm directly in classesByFqn_
+    auto itDot = classesByFqn_.find(norm);
+    if (itDot != classesByFqn_.end()) return &itDot->second;
+
+    // 4. If fqn contains '.', try replacing trailing dots from right to left with '$'
+    if (fqn.find('.') != std::string::npos) {
+        std::vector<size_t> dotPositions;
+        for (size_t i = 0; i < fqn.size(); ++i) {
+            if (fqn[i] == '.') dotPositions.push_back(i);
+        }
+        std::string dollarFqn = fqn;
+        for (auto rit = dotPositions.rbegin(); rit != dotPositions.rend(); ++rit) {
+            dollarFqn[*rit] = '$';
+            auto itDollar = classesByFqn_.find(dollarFqn);
+            if (itDollar != classesByFqn_.end()) return &itDollar->second;
+        }
+    }
+
+    // 5. Try replacing trailing dots with '$' in norm as well (if fqn had some '$')
+    if (norm != fqn && norm.find('.') != std::string::npos) {
+        std::vector<size_t> dotPositions;
+        for (size_t i = 0; i < norm.size(); ++i) {
+            if (norm[i] == '.') dotPositions.push_back(i);
+        }
+        std::string dollarFqn = norm;
+        for (auto rit = dotPositions.rbegin(); rit != dotPositions.rend(); ++rit) {
+            dollarFqn[*rit] = '$';
+            auto itDollar = classesByFqn_.find(dollarFqn);
+            if (itDollar != classesByFqn_.end()) return &itDollar->second;
+        }
+    }
+
     return nullptr;
 }
 
@@ -81,6 +181,22 @@ const JavaClass* SymbolTable::findClassByName(const std::string& simpleName) con
     auto it = fqnsByName_.find(simpleName);
     if (it != fqnsByName_.end() && !it->second.empty()) {
         return findClassByFqn(it->second.front());
+    }
+    std::string norm = simpleName;
+    std::replace(norm.begin(), norm.end(), '$', '.');
+    if (norm != simpleName) {
+        auto itNorm = fqnsByName_.find(norm);
+        if (itNorm != fqnsByName_.end() && !itNorm->second.empty()) {
+            return findClassByFqn(itNorm->second.front());
+        }
+    }
+    size_t lastSep = simpleName.find_last_of(".$");
+    if (lastSep != std::string::npos) {
+        std::string shortName = simpleName.substr(lastSep + 1);
+        auto itShort = fqnsByName_.find(shortName);
+        if (itShort != fqnsByName_.end() && !itShort->second.empty()) {
+            return findClassByFqn(itShort->second.front());
+        }
     }
     return nullptr;
 }
@@ -93,7 +209,7 @@ const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const 
     }
 
     // 1. Fully qualified already or qualified inner class?
-    if (simpleName.find('.') != std::string::npos) {
+    if (simpleName.find('.') != std::string::npos || simpleName.find('$') != std::string::npos) {
         auto cls = findClassByFqn(simpleName);
         if (cls) return cls;
 
@@ -101,19 +217,29 @@ const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const 
         if (!cu.packageName.empty()) {
             cls = findClassByFqn(cu.packageName + "." + simpleName);
             if (cls) return cls;
+            cls = findClassByFqn(cu.packageName + "$" + simpleName);
+            if (cls) return cls;
         }
 
         // Try explicit imports matching the prefix (e.g. import java.util.Map -> Map.Entry)
-        size_t firstDot = simpleName.find('.');
-        std::string rootName = simpleName.substr(0, firstDot);
-        std::string rest = simpleName.substr(firstDot);
+        size_t firstSep = simpleName.find_first_of(".$");
+        std::string rootName = simpleName.substr(0, firstSep);
+        std::string rest = simpleName.substr(firstSep);
         for (const auto& imp : cu.imports) {
             if (imp.rfind(".*") != std::string::npos) continue;
-            size_t lastDot = imp.find_last_of('.');
-            std::string impName = (lastDot != std::string::npos) ? imp.substr(lastDot + 1) : imp;
+            size_t lastSep = imp.find_last_of(".$");
+            std::string impName = (lastSep != std::string::npos) ? imp.substr(lastSep + 1) : imp;
             if (impName == rootName) {
                 cls = findClassByFqn(imp + rest);
                 if (cls) return cls;
+                if (!rest.empty() && rest.front() == '.') {
+                    cls = findClassByFqn(imp + "$" + rest.substr(1));
+                    if (cls) return cls;
+                }
+                if (!rest.empty() && rest.front() == '$') {
+                    cls = findClassByFqn(imp + "." + rest.substr(1));
+                    if (cls) return cls;
+                }
             }
         }
 
@@ -122,6 +248,8 @@ const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const 
             if (imp.length() >= 2 && imp.substr(imp.length() - 2) == ".*") {
                 std::string pkg = imp.substr(0, imp.length() - 2);
                 cls = findClassByFqn(pkg + "." + simpleName);
+                if (cls) return cls;
+                cls = findClassByFqn(pkg + "$" + simpleName);
                 if (cls) return cls;
             }
         }
@@ -138,14 +266,27 @@ const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const 
         std::string samePkgFqn = cu.packageName + "." + simpleName;
         auto cls = findClassByFqn(samePkgFqn);
         if (cls) return cls;
+        cls = findClassByFqn(cu.packageName + "$" + simpleName);
+        if (cls) return cls;
     }
 
     // 3. Explicit imports
     for (const auto& imp : cu.imports) {
         if (imp.rfind(".*") != std::string::npos) continue;
-        size_t lastDot = imp.find_last_of('.');
-        std::string impName = (lastDot != std::string::npos) ? imp.substr(lastDot + 1) : imp;
+        size_t lastSep = imp.find_last_of(".$");
+        std::string impName = (lastSep != std::string::npos) ? imp.substr(lastSep + 1) : imp;
         if (impName == simpleName) {
+            auto cls = findClassByFqn(imp);
+            if (cls) return cls;
+        }
+        std::string normImp = imp;
+        std::replace(normImp.begin(), normImp.end(), '$', '.');
+        std::string normSimple = simpleName;
+        std::replace(normSimple.begin(), normSimple.end(), '$', '.');
+        if (normImp == normSimple ||
+            (normImp.size() > normSimple.size() &&
+             normImp.compare(normImp.size() - normSimple.size(), normSimple.size(), normSimple) == 0 &&
+             normImp[normImp.size() - normSimple.size() - 1] == '.')) {
             auto cls = findClassByFqn(imp);
             if (cls) return cls;
         }
@@ -157,6 +298,8 @@ const JavaClass* SymbolTable::resolveClass(const std::string& simpleName, const 
             std::string pkg = imp.substr(0, imp.length() - 2);
             std::string candidateFqn = pkg + "." + simpleName;
             auto cls = findClassByFqn(candidateFqn);
+            if (cls) return cls;
+            cls = findClassByFqn(pkg + "$" + simpleName);
             if (cls) return cls;
         }
     }
@@ -216,10 +359,18 @@ void SymbolTable::registerJdkTypes() {
         "IllegalStateException", "NullPointerException", "IndexOutOfBoundsException",
         "UnsupportedOperationException", "SecurityException", "ClassCastException",
         "StringBuilder", "StringBuffer", "Math", "System", "Thread", "Runnable",
-        "Comparable", "CharSequence", "Iterable", "AutoCloseable", "Record", "Enum"
+        "Comparable", "CharSequence", "Iterable", "AutoCloseable", "Record", "Enum",
+        "Override", "Deprecated", "SuppressWarnings", "SafeVarargs", "FunctionalInterface"
     };
     for (const auto& t : langTypes) {
         registerSimpleClass("java.lang", t);
+    }
+
+    std::vector<std::string> langAnnotTypes = {
+        "Retention", "Target", "Documented", "Inherited", "Repeatable"
+    };
+    for (const auto& t : langAnnotTypes) {
+        registerSimpleClass("java.lang.annotation", t);
     }
 
     // Standard java.util types

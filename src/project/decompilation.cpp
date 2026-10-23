@@ -1,7 +1,10 @@
 #include "project/decompilation.h"
+#include "semantics/symbol_table.h"
 #include "utils/fs_utils.h"
 #include "utils/logger.h"
 #include <cstdlib>
+#include <algorithm>
+#include <unordered_set>
 
 namespace javalsp {
 
@@ -123,9 +126,19 @@ std::optional<std::string> DecompilationService::decompileClass(const std::strin
     return cacheDir_;
 }
 
-std::optional<std::string> DecompilationService::resolveSourceForFqn(const std::string& fqn) {
+std::optional<std::string> DecompilationService::resolveSourceForFqn(const std::string& fqn, const SymbolTable* symTab) {
+    if (!symTab) {
+        symTab = &SymbolTable::instance();
+    }
+
+    // Primitives and keywords have no source file
+    static const std::unordered_set<std::string> primitives = {
+        "void", "int", "boolean", "byte", "char", "short", "long", "float", "double"
+    };
+    if (primitives.count(fqn)) return std::nullopt;
+
     // 1. JDK standard library
-    if (fqn.rfind("java.", 0) == 0 || fqn.rfind("javax.", 0) == 0) {
+    if (fqn.rfind("java.", 0) == 0 || fqn.rfind("javax.", 0) == 0 || fqn.rfind("jdk.", 0) == 0 || fqn.rfind("sun.", 0) == 0) {
         auto jdk = getJdkSource(fqn);
         if (jdk) return jdk;
     }
@@ -137,10 +150,65 @@ std::optional<std::string> DecompilationService::resolveSourceForFqn(const std::
         if (utilJdk) return utilJdk;
     }
 
+    // 2. Look up class in SymbolTable
+    const JavaClass* cls = symTab->findClassByFqn(fqn);
+    if (!cls && fqn.find('.') == std::string::npos) {
+        cls = symTab->findClassByName(fqn);
+    }
+
+    if (cls && !cls->sourceFilePath.empty()) {
+        std::string archive = cls->sourceFilePath;
+        if (fs::fileExists(archive)) {
+            // Check if archive is src.zip
+            if (archive.find("src.zip") != std::string::npos) {
+                return getJdkSource(cls->fqn);
+            }
+
+            std::string relJava = cls->fqn;
+            std::replace(relJava.begin(), relJava.end(), '.', '/');
+            relJava += ".java";
+
+            // Check if a -sources.jar exists next to this jar
+            if (archive.size() > 4 && archive.substr(archive.size() - 4) == ".jar") {
+                std::string sourcesJar = archive.substr(0, archive.size() - 4) + "-sources.jar";
+                if (fs::fileExists(sourcesJar)) {
+                    std::string outSrc = cacheDir_ + "/sources/" + relJava;
+                    if (fs::fileExists(outSrc)) return outSrc;
+                    if (fs::extractZipEntry(sourcesJar, relJava, outSrc)) {
+                        return outSrc;
+                    }
+                }
+            }
+
+            // If not found in sources jar, extract .class and decompile with CFR
+            std::string relClass = cls->fqn;
+            std::replace(relClass.begin(), relClass.end(), '.', '/');
+            relClass += ".class";
+
+            std::string decompiledPath = cacheDir_ + "/decompiled/" + relJava;
+            if (fs::fileExists(decompiledPath)) {
+                return decompiledPath;
+            }
+
+            std::string classOut = cacheDir_ + "/classes/" + relClass;
+            if (fs::extractZipEntry(archive, relClass, classOut)) {
+                if (cfrJarPath_.empty()) locateCfrJar();
+                if (!cfrJarPath_.empty()) {
+                    std::string outDir = cacheDir_ + "/decompiled";
+                    std::string cmd = "java -jar \"" + cfrJarPath_ + "\" \"" + classOut + "\" --outputdir \"" + outDir + "\" >/dev/null 2>&1";
+                    fs::runCommand(cmd);
+                    if (fs::fileExists(decompiledPath)) {
+                        return decompiledPath;
+                    }
+                }
+            }
+        }
+    }
+
     const char* home = std::getenv("HOME");
     std::string homeStr = home ? home : "";
 
-    // 2. slf4j Logger
+    // 3. Fallback for common jars if not directly indexed
     if (fqn == "org.slf4j.Logger") {
         std::string slf4jSourcesJar = homeStr + "/.m2/repository/org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13-sources.jar";
         if (fs::fileExists(slf4jSourcesJar)) {
@@ -152,7 +220,6 @@ std::optional<std::string> DecompilationService::resolveSourceForFqn(const std::
         }
     }
 
-    // 3. logback Logger
     if (fqn == "ch.qos.logback.classic.Logger") {
         std::string logbackSourcesJar = homeStr + "/.m2/repository/ch/qos/logback/logback-classic/1.5.6/logback-classic-1.5.6-sources.jar";
         if (fs::fileExists(logbackSourcesJar)) {
