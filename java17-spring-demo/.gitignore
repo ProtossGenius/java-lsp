@@ -1,0 +1,21 @@
+# Maven build outputs
+target/
+*.class
+*.log
+
+# IDE metadata
+.project
+.classpath
+.factorypath
+.settings/
+.idea/
+*.iml
+.vscode/
+.nvim-dap.json
+
+# JVM crash logs
+hs_err_pid*
+
+# mybatis-xml.nvim virtual java files
+**/_mybatis_virtual/
+

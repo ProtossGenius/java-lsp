@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+  "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.demo.mapper.UserMapper">
+
+  <resultMap id="UserResultMap" type="com.example.demo.model.User">
+    <id column="id" property="id"/>
+    <result column="name" property="name"/>
+    <result column="email" property="email"/>
+  </resultMap>
+
+  <sql id="BaseColumnList">
+    id, name, email
+  </sql>
+
+  <select id="findAll" resultMap="UserResultMap">
+    select
+      <include refid="BaseColumnList"/>
+    from user_account
+    order by id
+  </select>
+
+  <select id="findById" parameterType="long" resultMap="UserResultMap">
+    select
+      <include refid="BaseColumnList"/>
+    from user_account
+    where id = #{id}
+  </select>
+
+  <insert id="insert" parameterType="com.example.demo.model.User" useGeneratedKeys="true" keyProperty="id">
+    insert into user_account (
+      name,
+      email
+    ) values (
+      #{user.name},
+      #{user.email}
+    )
+  </insert>
+</mapper>
